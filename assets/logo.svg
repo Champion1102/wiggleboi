@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200">
+  <defs>
+    <linearGradient id="snakeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#4ade80"/>
+      <stop offset="50%" style="stop-color:#22c55e"/>
+      <stop offset="100%" style="stop-color:#16a34a"/>
+    </linearGradient>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117"/>
+      <stop offset="100%" style="stop-color:#161b22"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="200" rx="12" fill="url(#bgGrad)" stroke="#30363d" stroke-width="1"/>
+
+  <!-- Snake body trail -->
+  <g opacity="0.6">
+    <circle cx="50"  cy="85" r="8" fill="#166534"/>
+    <circle cx="72"  cy="78" r="9" fill="#15803d"/>
+    <circle cx="96"  cy="74" r="10" fill="#16a34a"/>
+    <circle cx="122" cy="76" r="10" fill="#22c55e"/>
+  </g>
+
+  <!-- Title -->
+  <text x="400" y="95" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="72" font-weight="900" fill="url(#snakeGrad)" filter="url(#glow)" letter-spacing="4">
+    WIGGLEBOI
+  </text>
+
+  <!-- Snake head after title -->
+  <g transform="translate(710, 72)">
+    <circle cx="0" cy="0" r="14" fill="#4ade80"/>
+    <circle cx="-5" cy="-5" r="3" fill="#0d1117"/>
+    <circle cx="5"  cy="-5" r="3" fill="#0d1117"/>
+    <ellipse cx="0" cy="5" rx="4" ry="2" fill="#0d1117"/>
+  </g>
+
+  <!-- Subtitle -->
+  <text x="400" y="135" text-anchor="middle" font-family="'Courier New',monospace" font-size="16" fill="#7ee787" letter-spacing="6" opacity="0.9">
+    THE  SNAKE  THAT  WIGGLES
+  </text>
+
+  <!-- Nokia-style dots -->
+  <g opacity="0.3" fill="#4ade80">
+    <circle cx="280" cy="160" r="2"/>
+    <circle cx="295" cy="160" r="2"/>
+    <circle cx="310" cy="160" r="2"/>
+    <circle cx="490" cy="160" r="2"/>
+    <circle cx="505" cy="160" r="2"/>
+    <circle cx="520" cy="160" r="2"/>
+  </g>
+
+  <!-- Bottom decorative snake -->
+  <path d="M 200,170 Q 250,155 300,170 Q 350,185 400,170 Q 450,155 500,170 Q 550,185 600,170" stroke="#22c55e" stroke-width="3" fill="none" opacity="0.4" stroke-linecap="round"/>
+
+  <!-- Pixel corners for retro feel -->
+  <g fill="#30363d" opacity="0.5">
+    <rect x="16" y="16" width="4" height="4"/>
+    <rect x="24" y="16" width="4" height="4"/>
+    <rect x="16" y="24" width="4" height="4"/>
+    <rect x="776" y="16" width="4" height="4"/>
+    <rect x="768" y="16" width="4" height="4"/>
+    <rect x="776" y="24" width="4" height="4"/>
+    <rect x="16" y="176" width="4" height="4"/>
+    <rect x="24" y="176" width="4" height="4"/>
+    <rect x="16" y="168" width="4" height="4"/>
+    <rect x="776" y="176" width="4" height="4"/>
+    <rect x="768" y="176" width="4" height="4"/>
+    <rect x="776" y="168" width="4" height="4"/>
+  </g>
+</svg>
