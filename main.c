@@ -1,128 +1,205 @@
-/* main.c — the Snake game itself. Glues together all 5 custom libraries. */
+/*
+ * Snake Game — built entirely from scratch in C.
+ *
+ * Five custom libraries handle everything (no printf, malloc, etc.):
+ *   memory.c   — allocator using mmap() system call
+ *   string.c   — string length and integer-to-string conversion
+ *   math.c     — random numbers, bounds checking, collision detection
+ *   screen.c   — ANSI escape code rendering via write() system call
+ *   keyboard.c — non-blocking raw terminal input
+ *
+ * Controls: W/A/S/D to move, Q to quit.
+ * The snake grows when it eats food (*). Game ends on wall or self collision.
+ */
 
-#include <stdio.h>    /* printf for the final game-over line */
-#include <unistd.h>   /* usleep for frame delay */
-#include "snake.h"
+#include "libs/memory.h"
+#include "libs/screen.h"
+#include "libs/keyboard.h"
+#include "libs/string.h"
+#include "libs/math.h"
+#include <unistd.h>
+#include <time.h>
 
-#define WIDTH  40
-#define HEIGHT 20
+#define WIDTH     40     /* game board width  (playable columns) */
+#define HEIGHT    20     /* game board height (playable rows)    */
+#define MAX_LEN   800    /* maximum snake length (WIDTH * HEIGHT) */
 
-/* A snake segment is a node in a singly linked list of (x,y) positions. */
-typedef struct Segment {
-    int x, y;
-    struct Segment *next;
-} Segment;
+/* ---- Game state (global so helper functions can access it) ---- */
 
-static Segment *head;         /* front of the snake (where it grows) */
-static Segment *tail;         /* back of the snake (where it shrinks) */
-static int      dx = 1, dy = 0;  /* current direction vector */
-static int      food_x, food_y;
-static int      score     = 0;
-static int      game_over = 0;
+static int *snake_x;           /* x position of each segment */
+static int *snake_y;           /* y position of each segment */
+static int  snake_len;         /* current number of segments  */
 
-/* Allocate one new segment through our custom memory module. */
-static Segment *new_segment(int x, int y) {
-    Segment *s = (Segment *)my_alloc(sizeof(Segment));
-    s->x = x; s->y = y; s->next = 0;
-    return s;
-}
+static int dir_x = 1;         /* horizontal direction: -1, 0, or 1 */
+static int dir_y = 0;         /* vertical direction:   -1, 0, or 1 */
 
-static void init_snake(void) {
-    head = new_segment(WIDTH / 2, HEIGHT / 2);
-    tail = head;                 /* starts as one segment */
-}
+static int food_x, food_y;    /* current food position */
+static int score     = 0;
+static int game_over = 0;
 
-/* Put food at a random spot inside the walls. */
+/*
+ * Place food at a random spot that does not overlap the snake.
+ * Uses a do-while loop to keep trying until a valid spot is found.
+ */
 static void place_food(void) {
-    food_x = my_rand(WIDTH  - 3) + 2;
-    food_y = my_rand(HEIGHT - 3) + 2;
+    do {
+        food_x = rng_range(WIDTH) + 1;
+        food_y = rng_range(HEIGHT) + 1;
+    } while (hits_body(snake_x, snake_y, snake_len, food_x, food_y));
+
+    scr_putch(food_y + 1, food_x + 1, '*');
 }
 
-/* Draw the border once at startup. */
-static void draw_border(void) {
+/*
+ * Allocate memory and set the snake to 3 segments in the center.
+ * Array layout: index 0 = tail, index [snake_len - 1] = head.
+ */
+static void init_game(void) {
     int i;
-    for (i = 1; i <= WIDTH;  i++) { draw_at(1, i, '#'); draw_at(HEIGHT, i, '#'); }
-    for (i = 1; i <= HEIGHT; i++) { draw_at(i, 1, '#'); draw_at(i, WIDTH,  '#'); }
-}
 
-/* Check if (x,y) collides with any existing segment (self-bite). */
-static int hits_self(int x, int y) {
-    Segment *s = head;
-    while (s != 0) {
-        if (s->x == x && s->y == y) return 1;
-        s = s->next;
+    snake_x = mem_alloc(MAX_LEN * sizeof(int));
+    snake_y = mem_alloc(MAX_LEN * sizeof(int));
+    snake_len = 3;
+
+    for (i = 0; i < snake_len; i++) {
+        snake_x[i] = WIDTH / 2 - 2 + i;
+        snake_y[i] = HEIGHT / 2;
     }
-    return 0;
+
+    seed_rng((unsigned int)time(0));
 }
 
-/* Advance the snake by one step in the current direction. */
-static void step(void) {
-    int nx = head->x + dx;
-    int ny = head->y + dy;
+/*
+ * Set up the terminal and draw the first frame:
+ * border, initial snake, food, and score.
+ *
+ * Note: game coordinates (1..WIDTH, 1..HEIGHT) map to terminal
+ * coordinates with a +1 offset because the border occupies row/col 1.
+ */
+static void draw_initial(void) {
+    int i;
 
-    /* Wall collision (uses math.c). */
-    if (!in_bounds(nx, ny, WIDTH, HEIGHT)) { game_over = 1; return; }
+    kb_raw();
+    scr_hide_cursor();
+    scr_clear();
+    scr_draw_box(WIDTH, HEIGHT);
 
-    /* Self collision. */
-    if (hits_self(nx, ny)) { game_over = 1; return; }
+    /* Draw each segment: body = 'o', head (last segment) = '@' */
+    for (i = 0; i < snake_len; i++) {
+        char ch = (i == snake_len - 1) ? '@' : 'o';
+        scr_putch(snake_y[i] + 1, snake_x[i] + 1, ch);
+    }
 
-    /* Grow new head: put a fresh segment in front, point it at the old head. */
-    Segment *n = new_segment(nx, ny);
-    n->next = head;
-    head = n;
+    place_food();
+    scr_puts(HEIGHT + 3, 2, "Score: 0");
+}
 
-    if (nx == food_x && ny == food_y) {
-        score++;
-        place_food();            /* ate food -> keep tail, snake grew */
+/*
+ * Read one key from the keyboard. Update direction if valid.
+ * Prevents 180-degree turns (e.g. can't go left if already going right).
+ * Returns 0 if the player pressed 'q' to quit, 1 otherwise.
+ */
+static int handle_input(void) {
+    int key = kb_read();
+
+    if (key == 'q')
+        return 0;
+
+    if (key == 'w' && dir_y != 1)  { dir_x =  0; dir_y = -1; }
+    if (key == 's' && dir_y != -1) { dir_x =  0; dir_y =  1; }
+    if (key == 'a' && dir_x != 1)  { dir_x = -1; dir_y =  0; }
+    if (key == 'd' && dir_x != -1) { dir_x =  1; dir_y =  0; }
+
+    return 1;
+}
+
+/*
+ * Advance the snake by one step. Handles:
+ *   - wall collision (game over)
+ *   - eating food (grow + new food)
+ *   - self collision (game over)
+ *   - rendering the moved segments
+ */
+static void move_snake(void) {
+    int nx = snake_x[snake_len - 1] + dir_x;
+    int ny = snake_y[snake_len - 1] + dir_y;
+    int ate, i;
+    char score_buf[12];
+
+    /* Wall collision check */
+    if (!in_bounds(nx, ny, WIDTH, HEIGHT)) {
+        game_over = 1;
+        return;
+    }
+
+    /* Did the head land on food? */
+    ate = (nx == food_x && ny == food_y);
+
+    if (!ate) {
+        /* No food: erase tail from screen, then shift the body forward.
+           This removes the tail and makes room for the new head position. */
+        scr_putch(snake_y[0] + 1, snake_x[0] + 1, ' ');
+        for (i = 0; i < snake_len - 1; i++) {
+            snake_x[i] = snake_x[i + 1];
+            snake_y[i] = snake_y[i + 1];
+        }
     } else {
-        /* No food: erase tail on screen, unlink it, free it. */
-        draw_at(tail->y, tail->x, ' ');
+        /* Ate food: skip the shift so the tail stays — the snake grows. */
+        snake_len++;
+    }
 
-        /* Walk to the segment whose ->next is the current tail. */
-        Segment *s = head;
-        while (s->next != tail) s = s->next;
+    /* Self collision check (done after tail removal so we don't
+       falsely collide with a tail that was about to disappear). */
+    if (hits_body(snake_x, snake_y, snake_len - 1, nx, ny)) {
+        game_over = 1;
+        return;
+    }
 
-        my_free(tail);
-        tail = s;
-        tail->next = 0;
+    /* Place the new head at the front of the array */
+    snake_x[snake_len - 1] = nx;
+    snake_y[snake_len - 1] = ny;
+
+    /* Render: turn the old head into a body 'o', draw new head '@' */
+    if (snake_len > 1)
+        scr_putch(snake_y[snake_len - 2] + 1, snake_x[snake_len - 2] + 1, 'o');
+    scr_putch(ny + 1, nx + 1, '@');
+
+    /* If we ate food, update score and spawn new food */
+    if (ate) {
+        score++;
+        place_food();
+        int_to_str(score, score_buf);
+        scr_puts(HEIGHT + 3, 9, score_buf);
     }
 }
 
-/* Redraw the moving pieces + score. Border is static so we skip it. */
-static void draw(void) {
-    char buf[16];
+/* Restore the terminal to its original state and free memory. */
+static void cleanup(void) {
+    scr_puts(HEIGHT / 2 + 1, WIDTH / 2 - 3, "GAME OVER");
+    usleep(2000000);
 
-    draw_at(head->y, head->x, 'O');   /* snake head */
-    draw_at(food_y,  food_x,  '*');   /* food */
+    scr_show_cursor();
+    scr_clear();
+    kb_restore();
 
-    int_to_str(score, buf);           /* uses string.c */
-    print_str(HEIGHT + 1, 1, "Score: ");
-    print_str(HEIGHT + 1, 8, buf);
+    mem_free(snake_x, MAX_LEN * sizeof(int));
+    mem_free(snake_y, MAX_LEN * sizeof(int));
 }
+
+/* ---- Main game loop ---- */
 
 int main(void) {
-    kb_init();
-    clear_screen();
-    draw_border();
-    init_snake();
-    place_food();
+    init_game();
+    draw_initial();
 
     while (!game_over) {
-        /* Read one key this tick. Update direction, but forbid 180° turns. */
-        int k = kb_hit();
-        if      (k == 'w' && dy == 0) { dx = 0;  dy = -1; }
-        else if (k == 's' && dy == 0) { dx = 0;  dy =  1; }
-        else if (k == 'a' && dx == 0) { dx = -1; dy =  0; }
-        else if (k == 'd' && dx == 0) { dx =  1; dy =  0; }
-        else if (k == 'q') break;     /* quit */
+        if (!handle_input())
+            break;
 
-        step();
-        draw();
-        usleep(100000);               /* ~10 frames per second */
+        move_snake();
+        usleep(100000);   /* ~10 frames per second */
     }
 
-    kb_restore();
-    move_cursor(HEIGHT + 3, 1);
-    printf("Game Over! Final Score: %d\n", score);
+    cleanup();
     return 0;
 }
