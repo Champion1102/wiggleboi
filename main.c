@@ -17,8 +17,11 @@
 #include "libs/keyboard.h"
 #include "libs/string.h"
 #include "libs/math.h"
+#include "libs/sound.h"
 #include <unistd.h>
 #include <time.h>
+#include <signal.h>
+#include <stdlib.h>
 
 #define WIDTH     40     /* game board width  (playable columns) */
 #define HEIGHT    20     /* game board height (playable rows)    */
@@ -49,6 +52,12 @@ static void place_food(void) {
 
     scr_putch(food_y + 1, food_x + 1, '*');
 }
+
+/* Asset paths for sound effects. */
+#define SND_FOOD     "assets/food.mp3"
+#define SND_MOVE     "assets/move.mp3"
+#define SND_GAMEOVER "assets/gameover.mp3"
+#define SND_MUSIC    "assets/music.mp3"
 
 /*
  * Allocate memory and set the snake to 3 segments in the center.
@@ -105,10 +114,12 @@ static int handle_input(void) {
     if (key == 'q')
         return 0;
 
-    if (key == 'w' && dir_y != 1)  { dir_x =  0; dir_y = -1; }
-    if (key == 's' && dir_y != -1) { dir_x =  0; dir_y =  1; }
-    if (key == 'a' && dir_x != 1)  { dir_x = -1; dir_y =  0; }
-    if (key == 'd' && dir_x != -1) { dir_x =  1; dir_y =  0; }
+    int turned = 0;
+    if (key == 'w' && dir_y != 1)  { dir_x =  0; dir_y = -1; turned = 1; }
+    if (key == 's' && dir_y != -1) { dir_x =  0; dir_y =  1; turned = 1; }
+    if (key == 'a' && dir_x != 1)  { dir_x = -1; dir_y =  0; turned = 1; }
+    if (key == 'd' && dir_x != -1) { dir_x =  1; dir_y =  0; turned = 1; }
+    if (turned) snd_play(SND_MOVE);
 
     return 1;
 }
@@ -167,6 +178,7 @@ static void move_snake(void) {
     /* If we ate food, update score and spawn new food */
     if (ate) {
         score++;
+        snd_play(SND_FOOD);
         place_food();
         int_to_str(score, score_buf);
         scr_puts(HEIGHT + 3, 9, score_buf);
@@ -175,6 +187,8 @@ static void move_snake(void) {
 
 /* Restore the terminal to its original state and free memory. */
 static void cleanup(void) {
+    snd_music_stop();
+    snd_play(SND_GAMEOVER);
     scr_puts(HEIGHT / 2 + 1, WIDTH / 2 - 3, "GAME OVER");
     usleep(2000000);
 
@@ -188,9 +202,28 @@ static void cleanup(void) {
 
 /* ---- Main game loop ---- */
 
+/* If the terminal is closed or the process is killed, cleanup() never runs
+   and the looping music child would keep playing. Catch the usual exit
+   signals and stop music + restore the terminal before exiting. */
+static void on_signal(int sig) {
+    (void)sig;
+    snd_music_stop();
+    scr_show_cursor();
+    kb_restore();
+    _exit(0);
+}
+
 int main(void) {
     init_game();
     draw_initial();
+
+    atexit(snd_music_stop);
+    signal(SIGINT,  on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGHUP,  on_signal);
+    signal(SIGQUIT, on_signal);
+
+    snd_music_start(SND_MUSIC);
 
     while (!game_over) {
         if (!handle_input())
