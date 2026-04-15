@@ -1,23 +1,8 @@
-CC     = gcc
-CFLAGS = -Wall -O0
+CC = cc
+CFLAGS = -Wall -Wextra -O2
 
-OBJS = main.o math.o string.o memory.o screen.o keyboard.o
-
-snake: $(OBJS)
-	$(CC) $(CFLAGS) -o snake $(OBJS)
-
-main.o:     main.c     snake.h
-	$(CC) $(CFLAGS) -c main.c
-math.o:     math.c     snake.h
-	$(CC) $(CFLAGS) -c math.c
-string.o:   string.c   snake.h
-	$(CC) $(CFLAGS) -c string.c
-memory.o:   memory.c   snake.h
-	$(CC) $(CFLAGS) -c memory.c
-screen.o:   screen.c   snake.h
-	$(CC) $(CFLAGS) -c screen.c
-keyboard.o: keyboard.c snake.h
-	$(CC) $(CFLAGS) -c keyboard.c
+snake: main.c libs/math.c libs/string.c libs/memory.c libs/screen.c libs/keyboard.c
+	$(CC) $(CFLAGS) -o snake $^
 
 clean:
-	rm -f *.o snake
+	rm -f snake
