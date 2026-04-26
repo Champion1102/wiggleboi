@@ -1,8 +1,9 @@
 /*
- * Sound library — shells out to macOS's built-in `afplay` via fork+exec.
+ * Sound library — cross-platform audio via fork+exec.
  *
+ * macOS: afplay.  Linux: paplay (PulseAudio) with aplay fallback.
  * snd_play        : fire-and-forget one-shot (SIGCHLD ignored -> no zombies).
- * snd_music_start : spawns a child that loops afplay forever.
+ * snd_music_start : spawns a child that loops playback forever.
  * snd_music_stop  : kills that looping child.
  */
 
@@ -10,51 +11,64 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <fcntl.h>
+
+#ifdef __APPLE__
+static const char *snd_player = "afplay";
+#else
+static const char *snd_player = "paplay";
+#endif
 
 static pid_t music_pid = 0;
 
-/* One-shot sound effect. Parent returns immediately; child execs afplay. */
+static void silence_output(void) {
+    int devnull = open("/dev/null", 1);
+    if (devnull >= 0) {
+        dup2(devnull, 1);
+        dup2(devnull, 2);
+        close(devnull);
+    }
+}
+
 void snd_play(const char *path) {
     pid_t pid;
 
-    /* Reap automatically so short SFX don't leave zombies. */
     signal(SIGCHLD, SIG_IGN);
 
     pid = fork();
     if (pid == 0) {
-        /* Silence afplay's stdout/stderr so it doesn't corrupt the board. */
-        int devnull = open("/dev/null", 1);
-        if (devnull >= 0) {
-            dup2(devnull, 1);
-            dup2(devnull, 2);
-            close(devnull);
-        }
-        char *const argv[] = { "afplay", (char *)path, 0 };
-        execvp("afplay", argv);
+        silence_output();
+        char *const argv[] = { (char *)snd_player, (char *)path, 0 };
+        execvp(snd_player, argv);
         _exit(1);
     }
 }
 
-/* Background music: child loops afplay forever via /bin/sh.
-   The child calls setsid() so it becomes its own process-group leader;
-   that lets snd_music_stop kill sh *and* the afplay grandchild together. */
 void snd_music_start(const char *path) {
     pid_t pid = fork();
     if (pid == 0) {
+        pid_t child;
+        int st;
         setsid();
-        int devnull = open("/dev/null", 1);
-        if (devnull >= 0) {
-            dup2(devnull, 1);
-            dup2(devnull, 2);
-            close(devnull);
+        silence_output();
+        signal(SIGCHLD, SIG_DFL);
+        for (;;) {
+            child = fork();
+            if (child == 0) {
+#ifdef __APPLE__
+                char *const a[] = {"afplay","-v","0.2",(char*)path,0};
+                execvp("afplay", a);
+#else
+                char *const a[] = {"paplay",(char*)path,0};
+                execvp("paplay", a);
+                char *const b[] = {"aplay","-q",(char*)path,0};
+                execvp("aplay", b);
+#endif
+                _exit(1);
+            }
+            waitpid(child, &st, 0);
         }
-        char *const argv[] = {
-            "sh", "-c", "while :; do afplay -v 0.2 \"$0\"; done",
-            (char *)path, 0
-        };
-        execvp("sh", argv);
-        _exit(1);
     }
     music_pid = pid;
 }

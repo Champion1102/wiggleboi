@@ -15,6 +15,7 @@ void scr_text(int row, int col, const char *s, int r, int g, int b);
 void scr_fill(int r, int g, int b);
 void scr_present(void);
 
+void scr_set_offset(int ox, int oy);
 void scr_hide_cursor(void);
 void scr_show_cursor(void);
 

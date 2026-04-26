@@ -18,6 +18,9 @@ static void *grid_mem;
 void ent_init(int grid_w, int grid_h) {
     int i;
 
+    if (grid_mem)
+        munmap(grid_mem, (unsigned long)gw * gh);
+
     gw = grid_w;
     gh = grid_h;
 

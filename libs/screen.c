@@ -24,6 +24,7 @@ static int tw, th;
 static int ncells;
 static int gw, gh;
 static int gox, goy;
+static int shake_ox, shake_oy;
 static unsigned long total_mem;
 
 static int wb_s(int p, const char *s) {
@@ -83,11 +84,16 @@ void scr_shutdown(void) {
     front = 0;
 }
 
+void scr_set_offset(int ox, int oy) {
+    shake_ox = ox;
+    shake_oy = oy;
+}
+
 void scr_cell(int gx, int gy, int r, int g, int b) {
     int tx, ty, idx;
 
-    tx = gox + gx * 2;
-    ty = goy + gy;
+    tx = gox + gx * 2 + shake_ox;
+    ty = goy + gy + shake_oy;
     if (tx < 0 || tx + 1 >= tw || ty < 0 || ty >= th) return;
 
     idx = ty * tw + tx;

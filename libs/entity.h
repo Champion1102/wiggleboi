@@ -7,6 +7,10 @@
 #define ENT_SNAKE_HEAD  1
 #define ENT_SNAKE_BODY  2
 #define ENT_FOOD        3
+#define ENT_BONUS       4
+#define ENT_POISON      5
+#define ENT_POWERUP     6
+#define ENT_OBSTACLE    7
 
 #define ENT_ALIVE   (1 << 0)
 #define ENT_VISIBLE (1 << 1)
