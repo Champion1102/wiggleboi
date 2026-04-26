@@ -1,27 +1,18 @@
 /*
- * keyboard.c — non-blocking keyboard input.
+ * keyboard.c — non-blocking keyboard input with escape sequence parsing.
  *
- * Normal terminals wait for Enter before sending input, and they
- * echo every character you type. For a game we need:
- *   1. No waiting for Enter (raw mode via termios)
- *   2. No echo (typing 'w' shouldn't print 'w' on screen)
- *   3. Non-blocking reads (game keeps running even with no input)
- *
- * We use select() to check if a key is available before reading.
+ * Raw mode via termios: no echo, no line buffering, no signal keys.
+ * select() for non-blocking reads. Parses arrow key escape sequences
+ * (\033[A/B/C/D) and returns KB_UP/DOWN/LEFT/RIGHT constants.
  */
 
 #include <termios.h>
 #include <unistd.h>
 #include <sys/select.h>
+#include "screen.h"
 
-static struct termios original_settings;  /* saved to restore on exit */
+static struct termios original_settings;
 
-/*
- * Switch the terminal to raw mode:
- *   ICANON off = don't wait for Enter
- *   ECHO off   = don't show typed characters
- *   ISIG off   = don't handle Ctrl+C as a signal
- */
 void kb_raw(void) {
     struct termios raw;
 
@@ -36,30 +27,54 @@ void kb_raw(void) {
     tcsetattr(0, TCSAFLUSH, &raw);
 }
 
-/* Restore the terminal to its original settings. */
 void kb_restore(void) {
     tcsetattr(0, TCSAFLUSH, &original_settings);
 }
 
-/*
- * Try to read one key without waiting.
- * Returns the key character, or 0 if no key was pressed.
- *
- * select() with a zero timeout checks if input is available
- * without blocking — if yes, we read it; if no, we return 0
- * and the game loop continues.
- */
 int kb_read(void) {
-    struct timeval tv = {0, 0};
+    struct timeval tv;
     fd_set fds;
-    char c;
+    char c, seq;
 
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
     FD_ZERO(&fds);
     FD_SET(0, &fds);
 
-    if (select(1, &fds, 0, 0, &tv) > 0) {
-        read(0, &c, 1);
+    if (select(1, &fds, 0, 0, &tv) <= 0)
+        return 0;
+
+    if (read(0, &c, 1) != 1)
+        return 0;
+
+    if (c != '\033')
         return c;
-    }
+
+    /* ESC received — try to read escape sequence */
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    FD_ZERO(&fds);
+    FD_SET(0, &fds);
+    if (select(1, &fds, 0, 0, &tv) <= 0)
+        return 0;
+
+    if (read(0, &seq, 1) != 1 || seq != '[')
+        return 0;
+
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    FD_ZERO(&fds);
+    FD_SET(0, &fds);
+    if (select(1, &fds, 0, 0, &tv) <= 0)
+        return 0;
+
+    if (read(0, &seq, 1) != 1)
+        return 0;
+
+    if (seq == 'A') return KB_UP;
+    if (seq == 'B') return KB_DOWN;
+    if (seq == 'C') return KB_RIGHT;
+    if (seq == 'D') return KB_LEFT;
+
     return 0;
 }

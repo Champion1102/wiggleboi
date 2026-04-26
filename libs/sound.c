@@ -50,7 +50,7 @@ void snd_music_start(const char *path) {
             close(devnull);
         }
         char *const argv[] = {
-            "sh", "-c", "while :; do afplay \"$0\"; done",
+            "sh", "-c", "while :; do afplay -v 0.2 \"$0\"; done",
             (char *)path, 0
         };
         execvp("sh", argv);

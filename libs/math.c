@@ -21,9 +21,9 @@ int rng_range(int max) {
     return ((seed >> 16) & 0x7FFF) % max;
 }
 
-/* Check if position (x, y) is inside the playable area. */
+/* Check if position (x, y) is inside the playable area (0-indexed). */
 int in_bounds(int x, int y, int w, int h) {
-    return x >= 1 && x <= w && y >= 1 && y <= h;
+    return x >= 0 && x < w && y >= 0 && y < h;
 }
 
 /*
