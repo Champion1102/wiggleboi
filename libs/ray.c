@@ -1,6 +1,7 @@
 #include "ray.h"
 #include "screen.h"
 #include "entity.h"
+#include "texture.h"
 
 #define FP_SHIFT  10
 #define FP_ONE    (1 << FP_SHIFT)
@@ -14,6 +15,10 @@
 #define MAX_DEPTH 40
 #define MAX_SPRITES 32
 
+#define FOG_R 8
+#define FOG_G 10
+#define FOG_B 20
+
 static int sw, sh;
 static int gw, gh;
 
@@ -26,6 +31,7 @@ static int cos_tab[ANGLE_360];
 static int depth_buf[512];
 static int side_buf[512];
 static int wtype_buf[512];
+static int wall_tex_x[512];
 
 struct Sprite {
     int x, y;
@@ -73,7 +79,6 @@ static int angle_wrap(int a) {
 static int rc_sin(int a) { return sin_tab[angle_wrap(a)]; }
 static int rc_cos(int a) { return cos_tab[angle_wrap(a)]; }
 
-/* returns 0=empty, 1=boundary, 2=obstacle, 3=snake */
 static int wall_at(int gx, int gy) {
     int id;
     struct Entity *e;
@@ -105,6 +110,7 @@ void ray_init(int screen_w, int screen_h, int grid_w, int grid_h) {
         depth_buf[i] = MAX_DEPTH * FP_ONE;
         side_buf[i] = 0;
         wtype_buf[i] = 0;
+        wall_tex_x[i] = 0;
     }
     build_tables();
 }
@@ -170,17 +176,29 @@ void ray_cast(void) {
         }
 
         if (wt) {
-            int perp;
+            int perp, wall_x;
             if (side == 0)
                 perp = side_dist_x - delta_dist_x;
             else
                 perp = side_dist_y - delta_dist_y;
             if (perp <= 0) perp = 1;
 
-            int cos_diff = rc_cos(ray_angle - cam_angle);
-            if (cos_diff <= 0) cos_diff = 1;
-            perp = fp_mul(perp, cos_diff);
-            if (perp <= 0) perp = 1;
+            /* compute texture X from wall hit position */
+            if (side == 0)
+                wall_x = cam_y + fp_mul(perp, ray_dy);
+            else
+                wall_x = cam_x + fp_mul(perp, ray_dx);
+            wall_x = wall_x & (FP_ONE - 1);
+            wall_tex_x[col] = (wall_x * TEX_SIZE) >> FP_SHIFT;
+            wall_tex_x[col] &= TEX_MASK;
+
+            /* fisheye correction */
+            {
+                int cos_diff = rc_cos(ray_angle - cam_angle);
+                if (cos_diff <= 0) cos_diff = 1;
+                perp = fp_mul(perp, cos_diff);
+                if (perp <= 0) perp = 1;
+            }
 
             depth_buf[col] = perp;
             side_buf[col] = side;
@@ -189,16 +207,52 @@ void ray_cast(void) {
             depth_buf[col] = MAX_DEPTH * FP_ONE;
             side_buf[col] = 0;
             wtype_buf[col] = 0;
+            wall_tex_x[col] = 0;
         }
     }
 }
 
-void ray_draw_walls(void) {
+static int apply_fog(int channel, int fog_ch, int fog_factor) {
+    return ((channel * (FP_ONE - fog_factor)) + (fog_ch * fog_factor)) >> FP_SHIFT;
+}
+
+static int compute_wall_light(int perp, int side, int wt, int y,
+                              int wall_h, int draw_start, int tick) {
+    int norm, dist_atten, side_dim, vert_grad, flicker, light;
+
+    norm = (perp * 256) / (MAX_DEPTH * FP_ONE);
+    if (norm > 256) norm = 256;
+    dist_atten = 256 - (norm * norm) / 256;
+    if (dist_atten < 30) dist_atten = 30;
+
+    side_dim = side ? 180 : 256;
+
+    if (wall_h > 0) {
+        int vy = y - draw_start;
+        vert_grad = 256 - (vy * 25) / wall_h;
+    } else {
+        vert_grad = 256;
+    }
+
+    flicker = 256;
+    if (wt == 2) {
+        int f = ((tick * 7 + perp) >> 3) & 15;
+        flicker = 242 + f;
+        if (flicker > 256) flicker = 256;
+    }
+
+    light = (dist_atten * side_dim) >> 8;
+    light = (light * vert_grad) >> 8;
+    light = (light * flicker) >> 8;
+    if (light > 256) light = 256;
+    if (light < 18) light = 18;
+    return light;
+}
+
+void ray_draw_walls(int tick) {
     int col, wall_h, draw_start, draw_end, y;
     int perp, side, wt;
-    int bright, fog, r, g, b;
-    int base_r, base_g, base_b;
-    int ray_angle, ray_dx, ray_dy;
+    int ray_angle, ray_dx, ray_dy, cos_diff;
 
     for (col = 0; col < sw; col++) {
         perp = depth_buf[col];
@@ -211,82 +265,147 @@ void ray_draw_walls(void) {
         draw_start = (sh - wall_h) / 2;
         draw_end = draw_start + wall_h;
 
-        fog = perp / MAX_DEPTH;
-        if (fog > FP_ONE) fog = FP_ONE;
-
-        bright = FP_ONE - fog;
-        if (side == 1) bright = bright * 7 / 10;
-        if (bright < FP_ONE / 10) bright = FP_ONE / 10;
-
-        switch (wt) {
-        case 2:  base_r = 160; base_g = 130; base_b = 100; break;
-        case 3:  base_r = 80;  base_g = 170; base_b = 100; break;
-        default: base_r = 110; base_g = 120; base_b = 175; break;
-        }
-
-        r = (base_r * bright) >> FP_SHIFT;
-        g = (base_g * bright) >> FP_SHIFT;
-        b = (base_b * bright) >> FP_SHIFT;
-        if (r > 255) r = 255;
-        if (g > 255) g = 255;
-        if (b > 255) b = 255;
-
-        /* ceiling gradient */
-        for (y = 0; y < draw_start && y < sh; y++) {
-            int grad = y * 256 / (sh / 2 + 1);
-            int cr = 5 + grad / 20;
-            int cg = 5 + grad / 25;
-            int cb = 15 + grad / 10;
-            if (cr > 40) cr = 40;
-            if (cg > 35) cg = 35;
-            if (cb > 60) cb = 60;
-            scr_pixel(col, y, cr, cg, cb);
-        }
-
-        /* wall strip */
-        {
-            int ws = draw_start < 0 ? 0 : draw_start;
-            int we = draw_end > sh ? sh : draw_end;
-            scr_vline(col, ws, we - 1, r, g, b);
-        }
-
-        /* floor with checkerboard */
         ray_angle = angle_wrap(cam_angle - FOV / 2 + (col * FOV) / sw);
         ray_dx = rc_cos(ray_angle);
         ray_dy = -rc_sin(ray_angle);
+        cos_diff = rc_cos(ray_angle - cam_angle);
+        if (cos_diff <= 0) cos_diff = 1;
 
-        {
-            int cos_diff = rc_cos(ray_angle - cam_angle);
-            if (cos_diff <= 0) cos_diff = 1;
+        /* ---- ceiling: textured near, sky far ---- */
+        for (y = 0; y < draw_start && y < sh; y++) {
+            int dy_pix = sh / 2 - y;
+            if (dy_pix <= 0) dy_pix = 1;
 
-            for (y = draw_end; y < sh; y++) {
-                int dy_pix = y - sh / 2;
-                int row_dist, fx, fy, checker;
-                int fr, fg_, fb, ff;
+            int row_dist = fp_div(sh / 2 * FP_ONE, dy_pix * cos_diff);
+            if (row_dist < 0) row_dist = 0;
 
-                if (dy_pix <= 0) dy_pix = 1;
-                row_dist = fp_div(sh / 2 * FP_ONE, dy_pix * cos_diff);
-                if (row_dist < 0) row_dist = 0;
+            if (row_dist > MAX_DEPTH * FP_ONE / 2) {
+                /* sky gradient + stars */
+                int sky_t = y * 256 / (sh / 2 + 1);
+                int sr = 5 + sky_t / 15;
+                int sg = 5 + sky_t / 20;
+                int sb = 18 + sky_t / 4;
 
-                fx = cam_x + fp_mul(row_dist, ray_dx);
-                fy = cam_y - fp_mul(row_dist, ray_dy);
-                checker = ((fx >> FP_SHIFT) ^ (fy >> FP_SHIFT)) & 1;
-
-                ff = FP_ONE - row_dist / MAX_DEPTH;
-                if (ff < FP_ONE / 8) ff = FP_ONE / 8;
-                if (ff > FP_ONE) ff = FP_ONE;
-
-                if (checker) {
-                    fr = (32 * ff) >> FP_SHIFT;
-                    fg_ = (40 * ff) >> FP_SHIFT;
-                    fb = (28 * ff) >> FP_SHIFT;
-                } else {
-                    fr = (18 * ff) >> FP_SHIFT;
-                    fg_ = (22 * ff) >> FP_SHIFT;
-                    fb = (16 * ff) >> FP_SHIFT;
+                int star_seed = (col * 7919 + y * 104729 +
+                                 (cam_angle >> 2) * 31) & 0xFFFF;
+                if ((star_seed & 0x3FF) < 3) {
+                    sr = 180 + ((star_seed >> 12) & 3) * 18;
+                    sg = 180 + ((star_seed >> 10) & 3) * 15;
+                    sb = 200 + ((star_seed >> 8) & 3) * 12;
                 }
-                scr_pixel(col, y, fr, fg_, fb);
+                scr_pixel(col, y, sr, sg, sb);
+            } else {
+                int cx = cam_x + fp_mul(row_dist, ray_dx);
+                int cy = cam_y - fp_mul(row_dist, ray_dy);
+                int ctx = ((cx & (FP_ONE - 1)) * TEX_SIZE) >> FP_SHIFT;
+                int cty = ((cy & (FP_ONE - 1)) * TEX_SIZE) >> FP_SHIFT;
+                unsigned char tr, tg, tb;
+                int cf;
+
+                ctx &= TEX_MASK;
+                cty &= TEX_MASK;
+                tex_get(TEX_CEIL, ctx, cty, &tr, &tg, &tb);
+
+                cf = FP_ONE - row_dist * 4 / (MAX_DEPTH * 3);
+                if (cf < FP_ONE / 12) cf = FP_ONE / 12;
+                if (cf > FP_ONE) cf = FP_ONE;
+
+                scr_pixel(col, y,
+                          apply_fog(((int)tr * cf) >> FP_SHIFT, FOG_R, FP_ONE - cf),
+                          apply_fog(((int)tg * cf) >> FP_SHIFT, FOG_G, FP_ONE - cf),
+                          apply_fog(((int)tb * cf) >> FP_SHIFT, FOG_B, FP_ONE - cf));
             }
+        }
+
+        /* ---- wall strip: textured ---- */
+        {
+            int ws = draw_start < 0 ? 0 : draw_start;
+            int we = draw_end > sh ? sh : draw_end;
+            int tex_id, tex_x_col;
+
+            switch (wt) {
+            case 1:  tex_id = TEX_BOUNDARY; break;
+            case 2:  tex_id = TEX_STONE;    break;
+            case 3:  tex_id = TEX_SNAKE;    break;
+            default: tex_id = TEX_BRICK;    break;
+            }
+            tex_x_col = wall_tex_x[col];
+
+            /* animate snake texture */
+            if (tex_id == TEX_SNAKE) {
+                tex_x_col = (tex_x_col + (tick >> 2)) & TEX_MASK;
+            }
+
+            for (y = ws; y < we; y++) {
+                int tex_y = ((y - draw_start) * TEX_SIZE) / wall_h;
+                unsigned char tr, tg, tb;
+                int light, pr, pg, pb, fog_f;
+
+                tex_y &= TEX_MASK;
+                tex_get(tex_id, tex_x_col, tex_y, &tr, &tg, &tb);
+
+                light = compute_wall_light(perp, side, wt, y,
+                                           wall_h, draw_start, tick);
+                pr = ((int)tr * light) >> 8;
+                pg = ((int)tg * light) >> 8;
+                pb = ((int)tb * light) >> 8;
+
+                /* colored fog blend */
+                fog_f = perp * FP_ONE / (MAX_DEPTH * FP_ONE);
+                if (fog_f > FP_ONE) fog_f = FP_ONE;
+                if (fog_f < 0) fog_f = 0;
+                pr = apply_fog(pr, FOG_R, fog_f);
+                pg = apply_fog(pg, FOG_G, fog_f);
+                pb = apply_fog(pb, FOG_B, fog_f);
+
+                if (pr > 255) pr = 255;
+                if (pg > 255) pg = 255;
+                if (pb > 255) pb = 255;
+                scr_pixel(col, y, pr, pg, pb);
+            }
+        }
+
+        /* ---- floor: textured ---- */
+        for (y = draw_end; y < sh; y++) {
+            int dy_pix = y - sh / 2;
+            int row_dist, fx, fy;
+            int ftx, fty, tile_type, floor_tex;
+            unsigned char tr, tg, tb;
+            int ff, fr, fg_, fb;
+
+            if (dy_pix <= 0) dy_pix = 1;
+            row_dist = fp_div(sh / 2 * FP_ONE, dy_pix * cos_diff);
+            if (row_dist < 0) row_dist = 0;
+
+            fx = cam_x + fp_mul(row_dist, ray_dx);
+            fy = cam_y - fp_mul(row_dist, ray_dy);
+
+            ftx = ((fx & (FP_ONE - 1)) * TEX_SIZE) >> FP_SHIFT;
+            fty = ((fy & (FP_ONE - 1)) * TEX_SIZE) >> FP_SHIFT;
+            ftx &= TEX_MASK;
+            fty &= TEX_MASK;
+
+            tile_type = ((fx >> FP_SHIFT) ^ (fy >> FP_SHIFT)) & 1;
+            floor_tex = tile_type ? TEX_FLOOR_1 : TEX_FLOOR_2;
+            tex_get(floor_tex, ftx, fty, &tr, &tg, &tb);
+
+            ff = FP_ONE - row_dist / MAX_DEPTH;
+            if (ff < FP_ONE / 8) ff = FP_ONE / 8;
+            if (ff > FP_ONE) ff = FP_ONE;
+
+            fr = ((int)tr * ff) >> FP_SHIFT;
+            fg_ = ((int)tg * ff) >> FP_SHIFT;
+            fb = ((int)tb * ff) >> FP_SHIFT;
+
+            /* colored fog */
+            {
+                int fog_f = FP_ONE - ff;
+                fr = apply_fog(fr, FOG_R, fog_f);
+                fg_ = apply_fog(fg_, FOG_G, fog_f);
+                fb = apply_fog(fb, FOG_B, fog_f);
+            }
+
+            scr_pixel(col, y, fr, fg_, fb);
         }
     }
 }
@@ -343,8 +462,7 @@ void ray_draw_sprites(int tick) {
     int draw_sx, draw_ex;
     int stripe, y;
     int fog, bright;
-    int pulse, pr, pg, pb, sr, sg, sb;
-    int cx, dx_px, half_h, max_y_off, top, bot;
+    int pulse;
 
     collect_sprites();
     sort_sprites();
@@ -353,10 +471,10 @@ void ray_draw_sprites(int tick) {
     sin_a = rc_sin(cam_angle);
 
     for (i = 0; i < num_sprites; i++) {
+        int spr_id;
         dx = sprites[i].x - cam_x;
         dy = sprites[i].y - cam_y;
 
-        /* rotate into camera space: tz = depth, tx = lateral */
         tz = fp_mul(dx, cos_a) - fp_mul(dy, sin_a);
         tx = fp_mul(dx, sin_a) + fp_mul(dy, cos_a);
 
@@ -365,6 +483,7 @@ void ray_draw_sprites(int tick) {
         spr_screen_x = sw / 2 + (int)((long long)tx * sw / (2LL * tz));
         spr_h = iabs(fp_div(sh * FP_ONE, tz)) >> FP_SHIFT;
         if (spr_h > sh * 2) spr_h = sh * 2;
+        if (spr_h < 1) spr_h = 1;
         spr_w = spr_h;
 
         draw_sx = spr_screen_x - spr_w / 2;
@@ -379,37 +498,50 @@ void ray_draw_sprites(int tick) {
 
         pulse = ((tick >> 1) & 7);
         pulse = pulse < 4 ? pulse : 7 - pulse;
-        pr = sprites[i].r + pulse * 4;
-        pg = sprites[i].g + pulse * 3;
-        pb = sprites[i].b + pulse * 4;
-        if (pr > 255) pr = 255;
-        if (pg > 255) pg = 255;
-        if (pb > 255) pb = 255;
 
-        sr = (pr * bright) >> FP_SHIFT;
-        sg = (pg * bright) >> FP_SHIFT;
-        sb = (pb * bright) >> FP_SHIFT;
-        if (sr > 255) sr = 255;
-        if (sg > 255) sg = 255;
-        if (sb > 255) sb = 255;
+        switch (sprites[i].type) {
+        case ENT_FOOD:    spr_id = SPR_FOOD;    break;
+        case ENT_BONUS:   spr_id = SPR_BONUS;   break;
+        case ENT_POISON:  spr_id = SPR_POISON;  break;
+        case ENT_POWERUP: spr_id = SPR_POWERUP; break;
+        default:          spr_id = SPR_FOOD;     break;
+        }
 
         for (stripe = draw_sx; stripe < draw_ex; stripe++) {
+            int top, bot, stx;
             if (stripe >= 512 || tz >= depth_buf[stripe]) continue;
 
-            cx = spr_screen_x;
-            dx_px = iabs(stripe - cx);
-            half_h = spr_h / 2;
-            if (half_h <= 0) half_h = 1;
-            max_y_off = half_h - (dx_px * half_h) / (spr_w / 2 + 1);
-            if (max_y_off <= 0) continue;
+            stx = ((stripe - (spr_screen_x - spr_w / 2)) * SPR_SIZE) / spr_w;
+            if (stx < 0) stx = 0;
+            if (stx >= SPR_SIZE) stx = SPR_SIZE - 1;
 
-            top = sh / 2 - max_y_off;
-            bot = sh / 2 + max_y_off;
+            top = sh / 2 - spr_h / 2;
+            bot = sh / 2 + spr_h / 2;
             if (top < 0) top = 0;
             if (bot > sh) bot = sh;
 
-            for (y = top; y < bot; y++)
-                scr_pixel(stripe, y, sr, sg, sb);
+            for (y = top; y < bot; y++) {
+                unsigned char sr, sg, sb;
+                int transparent, sty;
+                int lr, lg, lb;
+
+                sty = ((y - (sh / 2 - spr_h / 2)) * SPR_SIZE) / spr_h;
+                if (sty < 0) sty = 0;
+                if (sty >= SPR_SIZE) sty = SPR_SIZE - 1;
+
+                spr_get(spr_id, stx, sty, &sr, &sg, &sb, &transparent);
+                if (transparent) continue;
+
+                lr = ((int)sr * bright) >> FP_SHIFT;
+                lg = ((int)sg * bright) >> FP_SHIFT;
+                lb = ((int)sb * bright) >> FP_SHIFT;
+
+                lr += pulse * 4; if (lr > 255) lr = 255;
+                lg += pulse * 3; if (lg > 255) lg = 255;
+                lb += pulse * 4; if (lb > 255) lb = 255;
+
+                scr_pixel(stripe, y, lr, lg, lb);
+            }
         }
     }
 }
