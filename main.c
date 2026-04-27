@@ -9,6 +9,7 @@
 #include "libs/ai.h"
 #include "libs/save.h"
 #include "libs/ray.h"
+#include "libs/texture.h"
 #include <unistd.h>
 #include <time.h>
 #include <signal.h>
@@ -521,7 +522,7 @@ static void render_game_3d(void) {
 
     cam_update();
     ray_cast();
-    ray_draw_walls();
+    ray_draw_walls(tick);
     ray_draw_sprites(tick);
 
     pw = scr_pixel_w();
@@ -536,6 +537,7 @@ static void render_game_3d(void) {
     scr_pixel(cx, cy - 1, 200, 200, 200);
     scr_pixel(cx, cy + 1, 200, 200, 200);
 
+    tex_draw_weapon(pw, ph, tick);
     draw_minimap();
     scr_pixels_flush();
 
@@ -1272,6 +1274,7 @@ int main(void) {
     save_load();
     kb_raw();
     scr_init(g_w, g_h);
+    tex_init();
     scr_fill(BG_R, BG_G, BG_B);
     snd_music_start(SND_MUSIC);
 
