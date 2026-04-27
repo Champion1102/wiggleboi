@@ -38,6 +38,8 @@ void snd_play(const char *path) {
 
     pid = fork();
     if (pid == 0) {
+        setsid();
+        close(0);
         silence_output();
         char *const argv[] = { (char *)snd_player, (char *)path, 0 };
         execvp(snd_player, argv);
@@ -51,6 +53,7 @@ void snd_music_start(const char *path) {
         pid_t child;
         int st;
         setsid();
+        close(0);
         silence_output();
         signal(SIGCHLD, SIG_DFL);
         for (;;) {

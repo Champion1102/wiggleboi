@@ -8,6 +8,7 @@
 #include "libs/fx.h"
 #include "libs/ai.h"
 #include "libs/save.h"
+#include "libs/ray.h"
 #include <unistd.h>
 #include <time.h>
 #include <signal.h>
@@ -77,6 +78,15 @@ static int obs_next  = 5;
 
 static int is_new_high = 0;
 
+/* ---- 3D camera ---- */
+
+#define CAM_FP  (1 << 10)
+#define CAM_A360 1024
+
+static int cam_cur_angle;
+static int cam_tgt_angle;
+static int render_3d = 0;
+
 /* ---- Colors ---- */
 
 enum {
@@ -96,6 +106,34 @@ static void detect_size(void) {
     if (g_h < 12) g_h = 12;
     if (g_w > 60) g_w = 60;
     if (g_h > 30) g_h = 30;
+}
+
+static int dir_to_angle(int dx, int dy) {
+    if (dx > 0) return 0;
+    if (dy < 0) return CAM_A360 / 4;
+    if (dx < 0) return CAM_A360 / 2;
+    return CAM_A360 * 3 / 4;
+}
+
+static void cam_update(void) {
+    int diff;
+    struct Entity *h;
+
+    cam_tgt_angle = dir_to_angle(dir_x, dir_y);
+
+    diff = cam_tgt_angle - cam_cur_angle;
+    if (diff > CAM_A360 / 2) diff -= CAM_A360;
+    if (diff < -CAM_A360 / 2) diff += CAM_A360;
+    cam_cur_angle += diff / 3;
+    if (cam_cur_angle < 0) cam_cur_angle += CAM_A360;
+    if (cam_cur_angle >= CAM_A360) cam_cur_angle -= CAM_A360;
+
+    if (head_id < 0) return;
+    h = ent_get(head_id);
+    ray_set_head(head_id);
+    ray_set_camera(h->x * CAM_FP + CAM_FP / 2,
+                   h->y * CAM_FP + CAM_FP / 2,
+                   cam_cur_angle);
 }
 
 /* ---- Snake chain helpers ---- */
@@ -351,7 +389,7 @@ static void draw_border(void) {
     }
 }
 
-static void render_game(void) {
+static void render_game_2d(void) {
     int x, y;
 
     for (y = 0; y < g_h; y++)
@@ -369,6 +407,139 @@ static void render_game(void) {
     fx_draw_parts();
     draw_border();
     draw_hud();
+}
+
+static void draw_minimap(void) {
+    int mx, my, px, py, pw, ph;
+    int ox, oy, ax, ay, i;
+    struct Entity *h;
+
+    if (head_id < 0) return;
+    h = ent_get(head_id);
+    pw = scr_pixel_w();
+    ph = scr_pixel_h();
+
+    ox = pw - g_w - 3;
+    oy = 2;
+
+    for (my = 0; my < g_h; my++) {
+        for (mx = 0; mx < g_w; mx++) {
+            px = ox + mx;
+            py = oy + my;
+            if (px < 0 || py < 0 || px >= pw || py >= ph) continue;
+
+            if (mx == h->x && my == h->y) {
+                scr_pixel(px, py, 50, 255, 120);
+            } else if (grid_occupied(mx, my)) {
+                int id = grid_at(mx, my);
+                if (id >= 0) {
+                    struct Entity *e = ent_get(id);
+                    if (e && e->type == ENT_FOOD)
+                        scr_pixel(px, py, 220, 50, 30);
+                    else if (e && e->type == ENT_BONUS)
+                        scr_pixel(px, py, 255, 220, 40);
+                    else if (e && (e->type == ENT_SNAKE_BODY || e->type == ENT_SNAKE_HEAD))
+                        scr_pixel(px, py, 30, 150, 70);
+                    else if (e && e->type == ENT_OBSTACLE)
+                        scr_pixel(px, py, 55, 50, 45);
+                    else
+                        scr_pixel(px, py, 100, 100, 120);
+                } else {
+                    scr_pixel(px, py, 100, 100, 120);
+                }
+            } else {
+                scr_pixel(px, py, 10, 10, 18);
+            }
+        }
+    }
+
+    /* direction arrow: 3 pixels ahead of head */
+    for (i = 1; i <= 3; i++) {
+        ax = ox + h->x + dir_x * i;
+        ay = oy + h->y + dir_y * i;
+        if (ax >= 0 && ax < pw && ay >= 0 && ay < ph)
+            scr_pixel(ax, ay, 100, 255, 160);
+    }
+
+    /* minimap border */
+    for (mx = -1; mx <= g_w; mx++) {
+        px = ox + mx;
+        if (px >= 0 && px < pw) {
+            if (oy - 1 >= 0) scr_pixel(px, oy - 1, 40, 40, 60);
+            if (oy + g_h < ph) scr_pixel(px, oy + g_h, 40, 40, 60);
+        }
+    }
+    for (my = -1; my <= g_h; my++) {
+        py = oy + my;
+        if (py >= 0 && py < ph) {
+            if (ox - 1 >= 0) scr_pixel(ox - 1, py, 40, 40, 60);
+            if (ox + g_w < pw) scr_pixel(ox + g_w, py, 40, 40, 60);
+        }
+    }
+}
+
+static const char *compass_dir(int angle) {
+    int idx = ((angle + 64) / 128) & 7;
+    static const char *dirs[] = { "E", "NE", "N", "NW", "W", "SW", "S", "SE" };
+    return dirs[idx];
+}
+
+static void render_game_3d(void) {
+    char buf[16];
+    int len, hud_row, col;
+    int cx, cy, pw, ph;
+
+    cam_update();
+    ray_cast();
+    ray_draw_walls();
+    ray_draw_sprites(tick);
+
+    pw = scr_pixel_w();
+    ph = scr_pixel_h();
+
+    /* crosshair */
+    cx = pw / 2;
+    cy = ph / 2;
+    scr_pixel(cx - 1, cy, 200, 200, 200);
+    scr_pixel(cx,     cy, 255, 255, 255);
+    scr_pixel(cx + 1, cy, 200, 200, 200);
+    scr_pixel(cx, cy - 1, 200, 200, 200);
+    scr_pixel(cx, cy + 1, 200, 200, 200);
+
+    draw_minimap();
+    scr_pixels_flush();
+
+    /* HUD — clear stale 2D HUD row then write 3D HUD */
+    hud_row = ph / 2 - 1;
+    {
+        int clr;
+        for (clr = 0; clr < TW; clr++)
+            scr_border(clr, hud_row - 1, 0, 0, 0);
+    }
+    scr_text(hud_row, 2, "Score:", 120, 120, 160);
+    len = int_to_str(score, buf);
+    scr_text(hud_row, 9, buf, 220, 220, 255);
+    scr_text(hud_row, 9 + len, "  ", 0, 0, 0);
+
+    col = 14;
+    if (shield_timer > 0) { scr_text(hud_row, col, "SHD", 60, 200, 255); col += 4; }
+    if (speed_timer > 0)  { scr_text(hud_row, col, "SPD", 255, 220, 50);  col += 4; }
+    if (slow_timer > 0)   { scr_text(hud_row, col, "SLO", 100, 220, 255); col += 4; }
+    if (double_timer > 0) { scr_text(hud_row, col, "x2",  255, 200, 30);  col += 3; }
+
+    /* compass */
+    scr_text(hud_row, TW - 16, "[", 80, 80, 110);
+    scr_text(hud_row, TW - 15, compass_dir(cam_cur_angle), 180, 200, 255);
+    len = str_len(compass_dir(cam_cur_angle));
+    scr_text(hud_row, TW - 15 + len, "]", 80, 80, 110);
+    scr_text(hud_row, TW - 15 + len + 1, " P:Pau", 80, 80, 110);
+}
+
+static void render_game(void) {
+    if (render_3d)
+        render_game_3d();
+    else
+        render_game_2d();
 }
 
 /* ---- Item spawning ---- */
@@ -493,6 +664,7 @@ static void reset_game(void) {
     ent_init(g_w, g_h);
     fx_init();
     ai_init(g_w, g_h);
+    ray_init(scr_pixel_w(), scr_pixel_h(), g_w, g_h);
 
     head_id = -1;
     tail_id = -1;
@@ -515,6 +687,9 @@ static void reset_game(void) {
     score = 0;
     game_over = 0;
 
+    cam_cur_angle = 0;
+    cam_tgt_angle = 0;
+
     for (i = 0; i < 3; i++)
         snake_push_head(g_w / 2 - 2 + i, g_h / 2);
 }
@@ -528,6 +703,28 @@ static void process_direction(int key) {
     if ((key == 'd' || key == 'l' || key == KB_RIGHT)  && dir_x != -1) { dir_x =  1; dir_y =  0; turned = 1; }
 
     if (turned) snd_play(SND_MOVE);
+}
+
+static void process_direction_3d(int key) {
+    int ndx, ndy, turned = 0;
+
+    if (key == 'a' || key == 'h' || key == KB_LEFT) {
+        ndx = dir_y; ndy = -dir_x;
+        dir_x = ndx; dir_y = ndy; turned = 1;
+    }
+    if (key == 'd' || key == 'l' || key == KB_RIGHT) {
+        ndx = -dir_y; ndy = dir_x;
+        dir_x = ndx; dir_y = ndy; turned = 1;
+    }
+    if (key == 's' || key == 'j' || key == KB_DOWN) {
+        dir_x = -dir_x; dir_y = -dir_y; turned = 1;
+    }
+
+    if (turned) {
+        cam_tgt_angle = dir_to_angle(dir_x, dir_y);
+        cam_cur_angle = cam_tgt_angle;
+        snd_play(SND_MOVE);
+    }
 }
 
 static void move_snake(void) {
@@ -792,6 +989,7 @@ static void tick_menu(void) {
         reset_game();
         scr_fill(BG_R, BG_G, BG_B);
         place_food();
+        render_3d = 1;
         state = ST_PLAYING;
         return;
     }
@@ -810,20 +1008,26 @@ static void tick_playing(void) {
     int key = kb_read();
 
     if (key == 'q' || key == 'Q') {
+        render_3d = 0;
         scr_fill(BG_R, BG_G, BG_B);
         state = ST_MENU;
         return;
     }
     if (key == 'p' || key == 'P') {
+        int pr;
         state = ST_PAUSED;
         render_game();
-        scr_text(1 + g_h / 2,     (TW - 6) / 2,  "PAUSED",              255, 255, 200);
-        scr_text(1 + g_h / 2 + 2, (TW - 20) / 2, "P - Resume  Q - Menu", 150, 150, 180);
+        pr = render_3d ? scr_pixel_h() / 4 : 1 + g_h / 2;
+        scr_text(pr,     (TW - 6) / 2,  "PAUSED",              255, 255, 200);
+        scr_text(pr + 2, (TW - 20) / 2, "P - Resume  Q - Menu", 150, 150, 180);
         scr_present();
         return;
     }
 
-    process_direction(key);
+    if (render_3d)
+        process_direction_3d(key);
+    else
+        process_direction(key);
     move_snake();
 
     if (!game_over) {
@@ -844,6 +1048,7 @@ static void tick_playing(void) {
         ai_kill_all();
         is_new_high = save_is_high(score);
         save_add(score, game_mode);
+        render_3d = 0;
         state = ST_GAMEOVER;
         go_phase = 0;
         go_id = tail_id;
@@ -863,6 +1068,7 @@ static void tick_paused(void) {
 
     if (key == 'p' || key == 'P') { state = ST_PLAYING; return; }
     if (key == 'q' || key == 'Q') {
+        render_3d = 0;
         scr_fill(BG_R, BG_G, BG_B);
         state = ST_MENU;
         return;
@@ -881,11 +1087,13 @@ static void tick_gameover(void) {
         reset_game();
         scr_fill(BG_R, BG_G, BG_B);
         place_food();
+        render_3d = 1;
         state = ST_PLAYING;
         return;
     }
     if (key == 'q' || key == 'Q') {
         snd_music_start(SND_MUSIC);
+        render_3d = 0;
         scr_fill(BG_R, BG_G, BG_B);
         state = ST_MENU;
         return;
