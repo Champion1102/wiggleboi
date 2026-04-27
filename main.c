@@ -43,6 +43,10 @@ static const char *mode_descs[] = {
     "Obstacles appear on grid"
 };
 
+static int view_mode = 1;
+static const char *view_names[] = { "2D Top-Down", "3D First-Person" };
+#define VIEW_COUNT 2
+
 /* ---- Game state ---- */
 
 static int head_id = -1;
@@ -71,10 +75,27 @@ static int double_timer = 0;
 static int speed_timer  = 0;
 static int slow_timer   = 0;
 
-#define MAX_OBS 20
+#define MAX_OBS 40
 static int obs_ids[MAX_OBS];
 static int obs_count = 0;
 static int obs_next  = 5;
+static int temp_hazard_cooldown = 0;
+
+#define PAT_MAX_CELLS 5
+struct ObsPattern { int count; int dx[PAT_MAX_CELLS]; int dy[PAT_MAX_CELLS]; };
+
+static const struct ObsPattern patterns[] = {
+    { 1, {0},         {0}         },
+    { 2, {0,1},       {0,0}       },
+    { 2, {0,0},       {0,1}       },
+    { 3, {0,1,2},     {0,0,0}     },
+    { 3, {0,0,0},     {0,1,2}     },
+    { 3, {0,1,0},     {0,0,1}     },
+    { 3, {0,1,1},     {0,0,1}     },
+    { 4, {0,1,2,1},   {0,0,0,1}   },
+    { 5, {0,2,0,1,2}, {0,0,1,1,1} },
+};
+#define PAT_COUNT 9
 
 static int is_new_high = 0;
 
@@ -336,12 +357,19 @@ static void draw_obstacles(void) {
     int i, phase, bright;
     struct Entity *o;
 
-    phase = (tick >> 3) & 7;
-    bright = phase < 4 ? phase : 7 - phase;
-
     for (i = 0; i < obs_count; i++) {
         o = ent_get(obs_ids[i]);
-        scr_cell(o->x, o->y, 55 + bright, 50 + bright, 45 + bright);
+        if (o->timer > 0) {
+            if (o->timer < 15 && (tick & 3) < 2)
+                continue;
+            phase = (tick >> 1) & 7;
+            bright = phase < 4 ? phase : 7 - phase;
+            scr_cell(o->x, o->y, 180 + bright * 8, 60 + bright * 4, 30 + bright * 2);
+        } else {
+            phase = (tick >> 3) & 7;
+            bright = phase < 4 ? phase : 7 - phase;
+            scr_cell(o->x, o->y, 55 + bright, 50 + bright, 45 + bright);
+        }
     }
 }
 
@@ -441,7 +469,9 @@ static void draw_minimap(void) {
                     else if (e && (e->type == ENT_SNAKE_BODY || e->type == ENT_SNAKE_HEAD))
                         scr_pixel(px, py, 30, 150, 70);
                     else if (e && e->type == ENT_OBSTACLE)
-                        scr_pixel(px, py, 55, 50, 45);
+                        scr_pixel(px, py, e->timer > 0 ? 180 : 55,
+                                          e->timer > 0 ? 60 : 50,
+                                          e->timer > 0 ? 30 : 45);
                     else
                         scr_pixel(px, py, 100, 100, 120);
                 } else {
@@ -639,7 +669,53 @@ static void despawn_powerup(void) {
     powerup_type = 0;
 }
 
-static void spawn_obstacle(void) {
+static void spawn_obstacle_pattern(void) {
+    const struct ObsPattern *pat;
+    struct Entity *o;
+    int pat_idx, fx, fy, i, id, cx, cy, fits;
+
+    if (score < 15)      pat_idx = 0;
+    else if (score < 30) pat_idx = rng_range(5);
+    else                 pat_idx = rng_range(PAT_COUNT);
+
+    pat = &patterns[pat_idx];
+
+    if (obs_count + pat->count > MAX_OBS) {
+        pat = &patterns[0];
+        if (obs_count >= MAX_OBS) return;
+    }
+
+    spawn_at_empty(&fx, &fy);
+
+    fits = 1;
+    for (i = 0; i < pat->count; i++) {
+        cx = fx + pat->dx[i];
+        cy = fy + pat->dy[i];
+        if (!in_bounds(cx, cy, g_w, g_h) || grid_occupied(cx, cy)) {
+            fits = 0;
+            break;
+        }
+    }
+    if (!fits) pat = &patterns[0];
+
+    for (i = 0; i < pat->count; i++) {
+        cx = fx + pat->dx[i];
+        cy = fy + pat->dy[i];
+        if (obs_count >= MAX_OBS) break;
+        id = ent_alloc();
+        if (id < 0) break;
+        o = ent_get(id);
+        o->x = cx;
+        o->y = cy;
+        o->type = ENT_OBSTACLE;
+        o->flags = ENT_ALIVE | ENT_VISIBLE;
+        o->timer = 0;
+        grid_set(cx, cy, id);
+        obs_ids[obs_count++] = id;
+    }
+}
+
+static void spawn_temp_hazard(void) {
     struct Entity *o;
     int fx, fy, id;
 
@@ -652,8 +728,32 @@ static void spawn_obstacle(void) {
     o->y = fy;
     o->type = ENT_OBSTACLE;
     o->flags = ENT_ALIVE | ENT_VISIBLE;
+    o->timer = 40 + rng_range(41);
     grid_set(fx, fy, id);
     obs_ids[obs_count++] = id;
+    temp_hazard_cooldown = 30;
+}
+
+static void update_temp_hazards(void) {
+    int i;
+    struct Entity *o;
+
+    if (temp_hazard_cooldown > 0)
+        temp_hazard_cooldown--;
+
+    for (i = obs_count - 1; i >= 0; i--) {
+        o = ent_get(obs_ids[i]);
+        if (o->timer > 0) {
+            o->timer--;
+            if (o->timer == 0) {
+                fx_spawn_burst(o->x, o->y, 180, 80, 60, 4);
+                grid_clear(o->x, o->y);
+                ent_free(obs_ids[i]);
+                obs_ids[i] = obs_ids[obs_count - 1];
+                obs_count--;
+            }
+        }
+    }
 }
 
 /* ---- Game logic ---- */
@@ -681,6 +781,7 @@ static void reset_game(void) {
     slow_timer = 0;
     obs_count = 0;
     obs_next = 5;
+    temp_hazard_cooldown = 0;
     snake_len = 0;
     dir_x = 1;
     dir_y = 0;
@@ -703,28 +804,6 @@ static void process_direction(int key) {
     if ((key == 'd' || key == 'l' || key == KB_RIGHT)  && dir_x != -1) { dir_x =  1; dir_y =  0; turned = 1; }
 
     if (turned) snd_play(SND_MOVE);
-}
-
-static void process_direction_3d(int key) {
-    int ndx, ndy, turned = 0;
-
-    if (key == 'a' || key == 'h' || key == KB_LEFT) {
-        ndx = dir_y; ndy = -dir_x;
-        dir_x = ndx; dir_y = ndy; turned = 1;
-    }
-    if (key == 'd' || key == 'l' || key == KB_RIGHT) {
-        ndx = -dir_y; ndy = dir_x;
-        dir_x = ndx; dir_y = ndy; turned = 1;
-    }
-    if (key == 's' || key == 'j' || key == KB_DOWN) {
-        dir_x = -dir_x; dir_y = -dir_y; turned = 1;
-    }
-
-    if (turned) {
-        cam_tgt_angle = dir_to_angle(dir_x, dir_y);
-        cam_cur_angle = cam_tgt_angle;
-        snd_play(SND_MOVE);
-    }
 }
 
 static void move_snake(void) {
@@ -756,8 +835,8 @@ static void move_snake(void) {
 
     gval = grid_at(nx, ny);
 
-    /* Empty cell */
-    if (gval == ENT_NONE) {
+    /* Empty cell (tail vacates this tick, so treat it as empty too) */
+    if (gval == ENT_NONE || gval == tail_id) {
         t = ent_get(tail_id);
         fx_trail_push(t->x, t->y);
         snake_pop_tail();
@@ -867,9 +946,15 @@ static void update_items(void) {
     if (slow_timer > 0)   slow_timer--;
 
     if (game_mode == MODE_CHALLENGE && score >= obs_next && obs_count < MAX_OBS) {
-        spawn_obstacle();
+        spawn_obstacle_pattern();
         obs_next = score + 5;
     }
+
+    if (game_mode == MODE_CHALLENGE && score >= 10 &&
+        temp_hazard_cooldown == 0 && rng_range(200) == 0) {
+        spawn_temp_hazard();
+    }
+    update_temp_hazards();
 }
 
 static int get_delay(void) {
@@ -946,8 +1031,15 @@ static void render_menu(void) {
     mlen = str_len(mode_descs[game_mode]);
     scr_text(9, (TW - mlen) / 2, mode_descs[game_mode], 80, 90, 100);
 
-    scr_text(11, (TW - 12) / 2, "[ENTER] Play", 150, 200, 150);
-    scr_text(12, (TW - 8) / 2, "[Q] Quit", 150, 150, 180);
+    /* View selector */
+    mlen = str_len(view_names[view_mode]);
+    mc = (TW - mlen - 6) / 2;
+    scr_text(11, mc, "W/S ", 100, 100, 140);
+    scr_text(11, mc + 4, view_names[view_mode], 180, 200, 230);
+    scr_text(11, mc + 4 + mlen, "  ", 0, 0, 0);
+
+    scr_text(13, (TW - 12) / 2, "[ENTER] Play", 150, 200, 150);
+    scr_text(14, (TW - 8) / 2, "[Q] Quit", 150, 150, 180);
 
     /* High scores */
     if (save_count() > 0 && g_h >= 18) {
@@ -989,7 +1081,7 @@ static void tick_menu(void) {
         reset_game();
         scr_fill(BG_R, BG_G, BG_B);
         place_food();
-        render_3d = 1;
+        render_3d = view_mode;
         state = ST_PLAYING;
         return;
     }
@@ -997,6 +1089,9 @@ static void tick_menu(void) {
         game_mode = (game_mode + MODE_COUNT - 1) % MODE_COUNT;
     if (key == 'd' || key == 'l' || key == KB_RIGHT)
         game_mode = (game_mode + 1) % MODE_COUNT;
+    if (key == 'w' || key == 'k' || key == KB_UP ||
+        key == 's' || key == 'j' || key == KB_DOWN)
+        view_mode = (view_mode + 1) % VIEW_COUNT;
 
     tick++;
     render_menu();
@@ -1024,10 +1119,11 @@ static void tick_playing(void) {
         return;
     }
 
-    if (render_3d)
-        process_direction_3d(key);
-    else
-        process_direction(key);
+    process_direction(key);
+    if (render_3d) {
+        cam_tgt_angle = dir_to_angle(dir_x, dir_y);
+        cam_cur_angle = cam_tgt_angle;
+    }
     move_snake();
 
     if (!game_over) {
@@ -1087,7 +1183,7 @@ static void tick_gameover(void) {
         reset_game();
         scr_fill(BG_R, BG_G, BG_B);
         place_food();
-        render_3d = 1;
+        render_3d = view_mode;
         state = ST_PLAYING;
         return;
     }
