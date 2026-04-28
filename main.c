@@ -8,6 +8,8 @@
 #include "libs/fx.h"
 #include "libs/ai.h"
 #include "libs/save.h"
+#include "libs/ray.h"
+#include "libs/texture.h"
 #include <unistd.h>
 #include <time.h>
 #include <signal.h>
@@ -42,6 +44,10 @@ static const char *mode_descs[] = {
     "Obstacles appear on grid"
 };
 
+static int view_mode = 1;
+static const char *view_names[] = { "2D Top-Down", "3D First-Person" };
+#define VIEW_COUNT 2
+
 /* ---- Game state ---- */
 
 static int head_id = -1;
@@ -70,12 +76,38 @@ static int double_timer = 0;
 static int speed_timer  = 0;
 static int slow_timer   = 0;
 
-#define MAX_OBS 20
+#define MAX_OBS 40
 static int obs_ids[MAX_OBS];
 static int obs_count = 0;
 static int obs_next  = 5;
+static int temp_hazard_cooldown = 0;
+
+#define PAT_MAX_CELLS 5
+struct ObsPattern { int count; int dx[PAT_MAX_CELLS]; int dy[PAT_MAX_CELLS]; };
+
+static const struct ObsPattern patterns[] = {
+    { 1, {0},         {0}         },
+    { 2, {0,1},       {0,0}       },
+    { 2, {0,0},       {0,1}       },
+    { 3, {0,1,2},     {0,0,0}     },
+    { 3, {0,0,0},     {0,1,2}     },
+    { 3, {0,1,0},     {0,0,1}     },
+    { 3, {0,1,1},     {0,0,1}     },
+    { 4, {0,1,2,1},   {0,0,0,1}   },
+    { 5, {0,2,0,1,2}, {0,0,1,1,1} },
+};
+#define PAT_COUNT 9
 
 static int is_new_high = 0;
+
+/* ---- 3D camera ---- */
+
+#define CAM_FP  (1 << 10)
+#define CAM_A360 1024
+
+static int cam_cur_angle;
+static int cam_tgt_angle;
+static int render_3d = 0;
 
 /* ---- Colors ---- */
 
@@ -96,6 +128,34 @@ static void detect_size(void) {
     if (g_h < 12) g_h = 12;
     if (g_w > 60) g_w = 60;
     if (g_h > 30) g_h = 30;
+}
+
+static int dir_to_angle(int dx, int dy) {
+    if (dx > 0) return 0;
+    if (dy < 0) return CAM_A360 / 4;
+    if (dx < 0) return CAM_A360 / 2;
+    return CAM_A360 * 3 / 4;
+}
+
+static void cam_update(void) {
+    int diff;
+    struct Entity *h;
+
+    cam_tgt_angle = dir_to_angle(dir_x, dir_y);
+
+    diff = cam_tgt_angle - cam_cur_angle;
+    if (diff > CAM_A360 / 2) diff -= CAM_A360;
+    if (diff < -CAM_A360 / 2) diff += CAM_A360;
+    cam_cur_angle += diff / 3;
+    if (cam_cur_angle < 0) cam_cur_angle += CAM_A360;
+    if (cam_cur_angle >= CAM_A360) cam_cur_angle -= CAM_A360;
+
+    if (head_id < 0) return;
+    h = ent_get(head_id);
+    ray_set_head(head_id);
+    ray_set_camera(h->x * CAM_FP + CAM_FP / 2,
+                   h->y * CAM_FP + CAM_FP / 2,
+                   cam_cur_angle);
 }
 
 /* ---- Snake chain helpers ---- */
@@ -298,12 +358,19 @@ static void draw_obstacles(void) {
     int i, phase, bright;
     struct Entity *o;
 
-    phase = (tick >> 3) & 7;
-    bright = phase < 4 ? phase : 7 - phase;
-
     for (i = 0; i < obs_count; i++) {
         o = ent_get(obs_ids[i]);
-        scr_cell(o->x, o->y, 55 + bright, 50 + bright, 45 + bright);
+        if (o->timer > 0) {
+            if (o->timer < 15 && (tick & 3) < 2)
+                continue;
+            phase = (tick >> 1) & 7;
+            bright = phase < 4 ? phase : 7 - phase;
+            scr_cell(o->x, o->y, 180 + bright * 8, 60 + bright * 4, 30 + bright * 2);
+        } else {
+            phase = (tick >> 3) & 7;
+            bright = phase < 4 ? phase : 7 - phase;
+            scr_cell(o->x, o->y, 55 + bright, 50 + bright, 45 + bright);
+        }
     }
 }
 
@@ -351,7 +418,7 @@ static void draw_border(void) {
     }
 }
 
-static void render_game(void) {
+static void render_game_2d(void) {
     int x, y;
 
     for (y = 0; y < g_h; y++)
@@ -369,6 +436,142 @@ static void render_game(void) {
     fx_draw_parts();
     draw_border();
     draw_hud();
+}
+
+static void draw_minimap(void) {
+    int mx, my, px, py, pw, ph;
+    int ox, oy, ax, ay, i;
+    struct Entity *h;
+
+    if (head_id < 0) return;
+    h = ent_get(head_id);
+    pw = scr_pixel_w();
+    ph = scr_pixel_h();
+
+    ox = pw - g_w - 3;
+    oy = 2;
+
+    for (my = 0; my < g_h; my++) {
+        for (mx = 0; mx < g_w; mx++) {
+            px = ox + mx;
+            py = oy + my;
+            if (px < 0 || py < 0 || px >= pw || py >= ph) continue;
+
+            if (mx == h->x && my == h->y) {
+                scr_pixel(px, py, 50, 255, 120);
+            } else if (grid_occupied(mx, my)) {
+                int id = grid_at(mx, my);
+                if (id >= 0) {
+                    struct Entity *e = ent_get(id);
+                    if (e && e->type == ENT_FOOD)
+                        scr_pixel(px, py, 220, 50, 30);
+                    else if (e && e->type == ENT_BONUS)
+                        scr_pixel(px, py, 255, 220, 40);
+                    else if (e && (e->type == ENT_SNAKE_BODY || e->type == ENT_SNAKE_HEAD))
+                        scr_pixel(px, py, 30, 150, 70);
+                    else if (e && e->type == ENT_OBSTACLE)
+                        scr_pixel(px, py, e->timer > 0 ? 180 : 55,
+                                          e->timer > 0 ? 60 : 50,
+                                          e->timer > 0 ? 30 : 45);
+                    else
+                        scr_pixel(px, py, 100, 100, 120);
+                } else {
+                    scr_pixel(px, py, 100, 100, 120);
+                }
+            } else {
+                scr_pixel(px, py, 10, 10, 18);
+            }
+        }
+    }
+
+    /* direction arrow: 3 pixels ahead of head */
+    for (i = 1; i <= 3; i++) {
+        ax = ox + h->x + dir_x * i;
+        ay = oy + h->y + dir_y * i;
+        if (ax >= 0 && ax < pw && ay >= 0 && ay < ph)
+            scr_pixel(ax, ay, 100, 255, 160);
+    }
+
+    /* minimap border */
+    for (mx = -1; mx <= g_w; mx++) {
+        px = ox + mx;
+        if (px >= 0 && px < pw) {
+            if (oy - 1 >= 0) scr_pixel(px, oy - 1, 40, 40, 60);
+            if (oy + g_h < ph) scr_pixel(px, oy + g_h, 40, 40, 60);
+        }
+    }
+    for (my = -1; my <= g_h; my++) {
+        py = oy + my;
+        if (py >= 0 && py < ph) {
+            if (ox - 1 >= 0) scr_pixel(ox - 1, py, 40, 40, 60);
+            if (ox + g_w < pw) scr_pixel(ox + g_w, py, 40, 40, 60);
+        }
+    }
+}
+
+static const char *compass_dir(int angle) {
+    int idx = ((angle + 64) / 128) & 7;
+    static const char *dirs[] = { "E", "NE", "N", "NW", "W", "SW", "S", "SE" };
+    return dirs[idx];
+}
+
+static void render_game_3d(void) {
+    char buf[16];
+    int len, hud_row, col;
+    int cx, cy, pw, ph;
+
+    cam_update();
+    ray_cast();
+    ray_draw_walls(tick);
+    ray_draw_sprites(tick);
+
+    pw = scr_pixel_w();
+    ph = scr_pixel_h();
+
+    /* crosshair */
+    cx = pw / 2;
+    cy = ph / 2;
+    scr_pixel(cx - 1, cy, 200, 200, 200);
+    scr_pixel(cx,     cy, 255, 255, 255);
+    scr_pixel(cx + 1, cy, 200, 200, 200);
+    scr_pixel(cx, cy - 1, 200, 200, 200);
+    scr_pixel(cx, cy + 1, 200, 200, 200);
+
+    tex_draw_weapon(pw, ph, tick);
+    draw_minimap();
+    scr_pixels_flush();
+
+    /* HUD — clear stale 2D HUD row then write 3D HUD */
+    hud_row = ph / 2 - 1;
+    {
+        int clr;
+        for (clr = 0; clr < TW; clr++)
+            scr_border(clr, hud_row - 1, 0, 0, 0);
+    }
+    scr_text(hud_row, 2, "Score:", 120, 120, 160);
+    len = int_to_str(score, buf);
+    scr_text(hud_row, 9, buf, 220, 220, 255);
+    scr_text(hud_row, 9 + len, "  ", 0, 0, 0);
+
+    col = 14;
+    if (shield_timer > 0) { scr_text(hud_row, col, "SHD", 60, 200, 255); col += 4; }
+    if (speed_timer > 0)  { scr_text(hud_row, col, "SPD", 255, 220, 50);  col += 4; }
+    if (slow_timer > 0)   { scr_text(hud_row, col, "SLO", 100, 220, 255); col += 4; }
+    if (double_timer > 0) { scr_text(hud_row, col, "x2",  255, 200, 30);  col += 3; }
+
+    /* compass */
+    scr_text(hud_row, TW - 16, "[", 80, 80, 110);
+    scr_text(hud_row, TW - 15, compass_dir(cam_cur_angle), 180, 200, 255);
+    len = str_len(compass_dir(cam_cur_angle));
+    scr_text(hud_row, TW - 15 + len, "]", 80, 80, 110);
+    scr_text(hud_row, TW - 15 + len + 1, " P:Pau", 80, 80, 110);
+}
+
+static void render_game(void) {
+    if (render_3d)
+        render_game_3d();
+    else
+        render_game_2d();
 }
 
 /* ---- Item spawning ---- */
@@ -468,7 +671,53 @@ static void despawn_powerup(void) {
     powerup_type = 0;
 }
 
-static void spawn_obstacle(void) {
+static void spawn_obstacle_pattern(void) {
+    const struct ObsPattern *pat;
+    struct Entity *o;
+    int pat_idx, fx, fy, i, id, cx, cy, fits;
+
+    if (score < 15)      pat_idx = 0;
+    else if (score < 30) pat_idx = rng_range(5);
+    else                 pat_idx = rng_range(PAT_COUNT);
+
+    pat = &patterns[pat_idx];
+
+    if (obs_count + pat->count > MAX_OBS) {
+        pat = &patterns[0];
+        if (obs_count >= MAX_OBS) return;
+    }
+
+    spawn_at_empty(&fx, &fy);
+
+    fits = 1;
+    for (i = 0; i < pat->count; i++) {
+        cx = fx + pat->dx[i];
+        cy = fy + pat->dy[i];
+        if (!in_bounds(cx, cy, g_w, g_h) || grid_occupied(cx, cy)) {
+            fits = 0;
+            break;
+        }
+    }
+    if (!fits) pat = &patterns[0];
+
+    for (i = 0; i < pat->count; i++) {
+        cx = fx + pat->dx[i];
+        cy = fy + pat->dy[i];
+        if (obs_count >= MAX_OBS) break;
+        id = ent_alloc();
+        if (id < 0) break;
+        o = ent_get(id);
+        o->x = cx;
+        o->y = cy;
+        o->type = ENT_OBSTACLE;
+        o->flags = ENT_ALIVE | ENT_VISIBLE;
+        o->timer = 0;
+        grid_set(cx, cy, id);
+        obs_ids[obs_count++] = id;
+    }
+}
+
+static void spawn_temp_hazard(void) {
     struct Entity *o;
     int fx, fy, id;
 
@@ -481,8 +730,32 @@ static void spawn_obstacle(void) {
     o->y = fy;
     o->type = ENT_OBSTACLE;
     o->flags = ENT_ALIVE | ENT_VISIBLE;
+    o->timer = 40 + rng_range(41);
     grid_set(fx, fy, id);
     obs_ids[obs_count++] = id;
+    temp_hazard_cooldown = 30;
+}
+
+static void update_temp_hazards(void) {
+    int i;
+    struct Entity *o;
+
+    if (temp_hazard_cooldown > 0)
+        temp_hazard_cooldown--;
+
+    for (i = obs_count - 1; i >= 0; i--) {
+        o = ent_get(obs_ids[i]);
+        if (o->timer > 0) {
+            o->timer--;
+            if (o->timer == 0) {
+                fx_spawn_burst(o->x, o->y, 180, 80, 60, 4);
+                grid_clear(o->x, o->y);
+                ent_free(obs_ids[i]);
+                obs_ids[i] = obs_ids[obs_count - 1];
+                obs_count--;
+            }
+        }
+    }
 }
 
 /* ---- Game logic ---- */
@@ -493,6 +766,7 @@ static void reset_game(void) {
     ent_init(g_w, g_h);
     fx_init();
     ai_init(g_w, g_h);
+    ray_init(scr_pixel_w(), scr_pixel_h(), g_w, g_h);
 
     head_id = -1;
     tail_id = -1;
@@ -509,11 +783,15 @@ static void reset_game(void) {
     slow_timer = 0;
     obs_count = 0;
     obs_next = 5;
+    temp_hazard_cooldown = 0;
     snake_len = 0;
     dir_x = 1;
     dir_y = 0;
     score = 0;
     game_over = 0;
+
+    cam_cur_angle = 0;
+    cam_tgt_angle = 0;
 
     for (i = 0; i < 3; i++)
         snake_push_head(g_w / 2 - 2 + i, g_h / 2);
@@ -559,8 +837,8 @@ static void move_snake(void) {
 
     gval = grid_at(nx, ny);
 
-    /* Empty cell */
-    if (gval == ENT_NONE) {
+    /* Empty cell (tail vacates this tick, so treat it as empty too) */
+    if (gval == ENT_NONE || gval == tail_id) {
         t = ent_get(tail_id);
         fx_trail_push(t->x, t->y);
         snake_pop_tail();
@@ -670,9 +948,15 @@ static void update_items(void) {
     if (slow_timer > 0)   slow_timer--;
 
     if (game_mode == MODE_CHALLENGE && score >= obs_next && obs_count < MAX_OBS) {
-        spawn_obstacle();
+        spawn_obstacle_pattern();
         obs_next = score + 5;
     }
+
+    if (game_mode == MODE_CHALLENGE && score >= 10 &&
+        temp_hazard_cooldown == 0 && rng_range(200) == 0) {
+        spawn_temp_hazard();
+    }
+    update_temp_hazards();
 }
 
 static int get_delay(void) {
@@ -749,8 +1033,15 @@ static void render_menu(void) {
     mlen = str_len(mode_descs[game_mode]);
     scr_text(9, (TW - mlen) / 2, mode_descs[game_mode], 80, 90, 100);
 
-    scr_text(11, (TW - 12) / 2, "[ENTER] Play", 150, 200, 150);
-    scr_text(12, (TW - 8) / 2, "[Q] Quit", 150, 150, 180);
+    /* View selector */
+    mlen = str_len(view_names[view_mode]);
+    mc = (TW - mlen - 6) / 2;
+    scr_text(11, mc, "W/S ", 100, 100, 140);
+    scr_text(11, mc + 4, view_names[view_mode], 180, 200, 230);
+    scr_text(11, mc + 4 + mlen, "  ", 0, 0, 0);
+
+    scr_text(13, (TW - 12) / 2, "[ENTER] Play", 150, 200, 150);
+    scr_text(14, (TW - 8) / 2, "[Q] Quit", 150, 150, 180);
 
     /* High scores */
     if (save_count() > 0 && g_h >= 18) {
@@ -792,6 +1083,7 @@ static void tick_menu(void) {
         reset_game();
         scr_fill(BG_R, BG_G, BG_B);
         place_food();
+        render_3d = view_mode;
         state = ST_PLAYING;
         return;
     }
@@ -799,6 +1091,9 @@ static void tick_menu(void) {
         game_mode = (game_mode + MODE_COUNT - 1) % MODE_COUNT;
     if (key == 'd' || key == 'l' || key == KB_RIGHT)
         game_mode = (game_mode + 1) % MODE_COUNT;
+    if (key == 'w' || key == 'k' || key == KB_UP ||
+        key == 's' || key == 'j' || key == KB_DOWN)
+        view_mode = (view_mode + 1) % VIEW_COUNT;
 
     tick++;
     render_menu();
@@ -810,20 +1105,27 @@ static void tick_playing(void) {
     int key = kb_read();
 
     if (key == 'q' || key == 'Q') {
+        render_3d = 0;
         scr_fill(BG_R, BG_G, BG_B);
         state = ST_MENU;
         return;
     }
     if (key == 'p' || key == 'P') {
+        int pr;
         state = ST_PAUSED;
         render_game();
-        scr_text(1 + g_h / 2,     (TW - 6) / 2,  "PAUSED",              255, 255, 200);
-        scr_text(1 + g_h / 2 + 2, (TW - 20) / 2, "P - Resume  Q - Menu", 150, 150, 180);
+        pr = render_3d ? scr_pixel_h() / 4 : 1 + g_h / 2;
+        scr_text(pr,     (TW - 6) / 2,  "PAUSED",              255, 255, 200);
+        scr_text(pr + 2, (TW - 20) / 2, "P - Resume  Q - Menu", 150, 150, 180);
         scr_present();
         return;
     }
 
     process_direction(key);
+    if (render_3d) {
+        cam_tgt_angle = dir_to_angle(dir_x, dir_y);
+        cam_cur_angle = cam_tgt_angle;
+    }
     move_snake();
 
     if (!game_over) {
@@ -844,6 +1146,7 @@ static void tick_playing(void) {
         ai_kill_all();
         is_new_high = save_is_high(score);
         save_add(score, game_mode);
+        render_3d = 0;
         state = ST_GAMEOVER;
         go_phase = 0;
         go_id = tail_id;
@@ -863,6 +1166,7 @@ static void tick_paused(void) {
 
     if (key == 'p' || key == 'P') { state = ST_PLAYING; return; }
     if (key == 'q' || key == 'Q') {
+        render_3d = 0;
         scr_fill(BG_R, BG_G, BG_B);
         state = ST_MENU;
         return;
@@ -881,11 +1185,13 @@ static void tick_gameover(void) {
         reset_game();
         scr_fill(BG_R, BG_G, BG_B);
         place_food();
+        render_3d = view_mode;
         state = ST_PLAYING;
         return;
     }
     if (key == 'q' || key == 'Q') {
         snd_music_start(SND_MUSIC);
+        render_3d = 0;
         scr_fill(BG_R, BG_G, BG_B);
         state = ST_MENU;
         return;
@@ -968,6 +1274,7 @@ int main(void) {
     save_load();
     kb_raw();
     scr_init(g_w, g_h);
+    tex_init();
     scr_fill(BG_R, BG_G, BG_B);
     snd_music_start(SND_MUSIC);
 

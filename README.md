@@ -7,12 +7,12 @@
 <img src="https://img.shields.io/badge/Language-C-A8B9CC?style=for-the-badge&logo=c&logoColor=white" />
 <img src="https://img.shields.io/badge/Platform-Terminal-black?style=for-the-badge&logo=windowsterminal&logoColor=white" />
 <img src="https://img.shields.io/badge/stdlib-ZERO-ff3333?style=for-the-badge" />
-<img src="https://img.shields.io/badge/Binary-72KB-2FC446?style=for-the-badge" />
+<img src="https://img.shields.io/badge/Binary-~90KB-2FC446?style=for-the-badge" />
 
 <br><br>
 
-<h3>The world's most overengineered terminal snake game</h3>
-<p>Truecolor rendering. Entity pools. AI opponents. Particle effects. All in pure C with zero standard library.</p>
+<h3>First-person 3D raycasting snake game in the terminal</h3>
+<p>Wolfenstein 3D meets Snake. DDA raycasting, half-block pixel rendering, sprite projection — all in pure C with zero standard library.</p>
 
 ---
 
@@ -20,31 +20,76 @@
 
 ## What Is This
 
-A snake game built entirely from scratch in C — no `printf`, no `malloc`, no `strlen`. Just raw system calls (`mmap`, `write`, `read`, `fork`, `select`, `ioctl`). Every component is hand-rolled: the renderer, the allocator, the RNG, the input system, the audio engine.
+A snake game built entirely from scratch in C — no `printf`, no `malloc`, no `strlen`, no `math.h`. Just raw system calls (`mmap`, `write`, `read`, `fork`, `select`, `ioctl`). Every component is hand-rolled: the 3D raycaster, the renderer, the allocator, the RNG, the input system, the audio engine.
 
-It started as a Nokia-style snake clone. It became a truecolor, double-buffered, entity-pooled, AI-driven, particle-spewing terminal game with 4 game modes, power-ups, and persistent high scores — in 72KB.
+This branch adds a **first-person 3D mode** — the game launches into a Wolfenstein-style raycasted view where you see the arena from the snake's eyes. Walls have depth and directional coloring, food and power-ups are 3D sprites, and a checkerboard floor gives motion parallax.
+
+The 2D version lives on the `main` branch.
 
 ---
 
-## Play
+## Build & Run
 
 ```bash
+make clean  # remove old binary
 make        # compile
 ./snake     # play!
-make clean  # remove binary
 ```
 
-Requires a truecolor terminal (iTerm2, Terminal.app, Kitty, Ghostty, Windows Terminal, most modern Linux terminals).
+Requires a **truecolor terminal** (iTerm2, Terminal.app, Kitty, Ghostty, Windows Terminal, most modern Linux terminals).
 
-## Controls
+## Controls (3D Mode)
+
+Controls are **camera-relative** — left/right turn relative to where you're facing:
 
 ```
-  WASD / Arrow Keys / HJKL — Move
-  P — Pause
-  Q — Quit / Back to menu
-  ENTER — Start / Restart
-  Left/Right — Select mode on menu
+  W / Up Arrow    — Move forward
+  A / Left Arrow  — Turn left
+  D / Right Arrow — Turn right
+  S / Down Arrow  — Reverse direction
+  P               — Pause
+  Q               — Quit / Back to menu
+  ENTER           — Start / Restart
+  Left/Right      — Select mode on menu
 ```
+
+## HUD Elements
+
+- **Crosshair** — small cross at screen center
+- **Compass** — `[N]`, `[SE]`, etc. shows facing direction
+- **Minimap** — top-right corner shows full arena, player position, and facing direction arrow
+- **Score + power-up indicators** — bottom row
+
+---
+
+## 3D Rendering
+
+### Raycaster
+- **DDA algorithm** — same grid-traversal as Wolfenstein 3D, using the existing spatial grid for O(1) wall detection
+- **Fixed-point math** — 10-bit fractional precision, precomputed sin/cos lookup table (Bhaskara I approximation), no floats anywhere
+- **Fisheye correction** — perpendicular distance prevents barrel distortion
+- **FOV** — 170 angle units (~60 degrees)
+- **View distance** — 40 grid cells with distance fog
+
+### Half-Block Pixel Rendering
+Each terminal cell renders **2 vertical pixels** using Unicode half-block characters (`U+2580`). A terminal window of 80x24 becomes an 80x48 pixel framebuffer. Foreground color = top pixel, background color = bottom pixel.
+
+### Wall Types
+Walls are color-coded by type:
+- **Arena boundary** — blue-tinted (110, 120, 175)
+- **Obstacles** — warm stone (160, 130, 100)
+- **Snake bodies** — green-tinted (80, 170, 100)
+
+N/S walls are shaded darker than E/W walls (classic Wolfenstein directional lighting).
+
+### Sprites
+Food, power-ups, bonus items, and AI snakes are rendered as 3D billboarded sprites with:
+- Distance-based fog
+- Z-buffer occlusion against walls
+- Pulsing animation per entity type
+
+### Floor
+Checkerboard pattern computed via floor raycasting — world-space coordinates give motion parallax as the snake moves.
 
 ---
 
@@ -73,75 +118,40 @@ Requires a truecolor terminal (iTerm2, Terminal.app, Kitty, Ghostty, Windows Ter
 
 Up to 4 AI snakes spawn as your score rises (at 8, 16, 25, 35). They compete for your food and create obstacles you must avoid.
 
-| Personality | Color | Behavior |
-|-------------|-------|----------|
-| Aggressive | Red/orange | BFS pathfinds toward food |
-| Cautious | Blue/purple | Avoids player when close |
-| Random | Yellow/green | Pure random wander |
-
-AI pathfinding uses depth-limited BFS (max 5 cells) with distributed updates — only 1 AI runs expensive pathfinding per tick.
-
 ---
 
 ## Architecture
 
-### Rendering Engine
-- **Double-buffered truecolor** — 24-bit RGB via `\033[48;2;R;G;Bm`
-- **Dirty-cell diffing** — only changed cells are written each frame
-- **Single `write()` per frame** — all ANSI output accumulated in staging buffer
-- **Synchronized output** — `\033[?2026h/l` prevents tearing
-- Each game cell = 2 terminal columns (approximate square aspect ratio)
-
-### Entity System (OpenRCT2-inspired)
-- **Fixed-size pool** — 1024 pre-allocated entities, stack-based free list
-- **Spatial grid** — `grid[y * w + x]` gives O(1) collision detection
-- **Packed structs** — 12 bytes per entity with linked-list chaining for snake bodies
-- Snake movement = push head + pop tail on the linked chain (no array shifting)
-
-### Optimization Techniques
-
-| Source | Technique | Application |
-|--------|-----------|-------------|
-| OpenRCT2 | Entity pool with free list | O(1) alloc/free, zero fragmentation |
-| OpenRCT2 | Spatial grid O(1) lookup | Replaces O(n) body collision scan |
-| OpenRCT2 | Distributed tick updates | 1 AI gets BFS per tick via `idx & 3 == tick & 3` |
-| OpenRCT2 | Packed structs with bit flags | 12-byte entities, single-byte flags |
-| Terminal-doom | Static buffers everywhere | All buffers fixed-size, zero allocation in hot loop |
-| Terminal-doom | Synchronized output mode 2026 | Tear-free rendering |
-| Terminal-doom | Single write() per frame | Minimized syscall overhead |
-
----
-
-## 11 Custom Libraries — Zero Dependencies
+### File Structure
 
 ```
 wiggleboi/
-  main.c                 Game loop, state machine, rendering (~1000 lines)
+  main.c                 Game loop, state machine, 2D/3D rendering (~1200 lines)
   libs/
-    memory.h/.c          mmap/munmap allocator (replaces malloc/free)
-    string.h/.c          str_len, int_to_str (replaces strlen/sprintf)
-    math.h/.c            LCG random, bounds check (replaces rand/math.h)
-    screen.h/.c          Double-buffered truecolor renderer (replaces ncurses)
-    keyboard.h/.c        Raw mode input + arrow key parsing (replaces getchar)
-    sound.h/.c           Cross-platform audio via fork+exec (afplay/paplay)
-    entity.h/.c          Entity pool + spatial grid (OpenRCT2 pattern)
-    fx.h/.c              Particle system + screen shake
+    ray.h/.c             DDA raycaster, sprite projection, floor casting (~420 lines)
+    screen.h/.c          Half-block pixel buffer + cell-mode renderer (~315 lines)
+    entity.h/.c          Entity pool + spatial grid
     ai.h/.c              AI snakes with bounded BFS pathfinding
+    fx.h/.c              Particle system + screen shake
+    keyboard.h/.c        Raw mode input + arrow key parsing
+    sound.h/.c           Cross-platform audio via fork+exec (afplay/paplay)
     save.h/.c            Binary high score persistence (~/.wiggleboi_scores)
+    memory.h/.c          mmap/munmap allocator
+    string.h/.c          str_len, int_to_str
+    math.h/.c            LCG random, bounds check
 ```
 
-## Technical Stats
+### Technical Stats
 
 | Metric | Value |
 |--------|-------|
-| Total lines of code | ~2,400 |
-| Binary size | 72KB |
+| Total lines of code | ~3,000 |
+| Binary size | ~90KB |
 | Runtime memory | < 64KB |
 | Standard library calls | 0 (only raw syscalls) |
 | External dependencies | 0 |
-| Game modes | 4 |
-| AI opponents | Up to 4 simultaneous |
-| Color depth | 24-bit truecolor (16.7M colors) |
+| Rendering | Half-block pixels (2x vertical resolution) |
+| Math | Fixed-point (10-bit shift), no floats |
 | Platform | macOS, Linux |
 
 ---
@@ -151,7 +161,7 @@ wiggleboi/
 ```
         Built with raw C and zero chill.
 
-              ~ WiggleBoi 2025 ~
+              ~ WiggleBoi 3D ~
 
                 ooooooooooooo@
 ```

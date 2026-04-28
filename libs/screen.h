@@ -19,4 +19,12 @@ void scr_set_offset(int ox, int oy);
 void scr_hide_cursor(void);
 void scr_show_cursor(void);
 
+void scr_pixel(int x, int y, int r, int g, int b);
+void scr_rect(int x, int y, int w, int h, int r, int g, int b);
+void scr_vline(int x, int y1, int y2, int r, int g, int b);
+void scr_pixel_clear(int r, int g, int b);
+void scr_pixels_flush(void);
+int  scr_pixel_w(void);
+int  scr_pixel_h(void);
+
 #endif

@@ -11,6 +11,8 @@
 #include <sys/mman.h>
 #include "string.h"
 
+#define CH_HALF_UP '\x01'
+
 struct TCel {
     unsigned char br, bg, bb;
     unsigned char fr, fg, fb;
@@ -26,6 +28,8 @@ static int gw, gh;
 static int gox, goy;
 static int shake_ox, shake_oy;
 static unsigned long total_mem;
+static unsigned char *pixels;
+static int pix_w, pix_h;
 
 static int wb_s(int p, const char *s) {
     while (*s) wbuf[p++] = *s++;
@@ -52,8 +56,12 @@ void scr_init(int game_w, int game_h) {
     ncells = tw * th;
     gox = 1;
     goy = 1;
+    pix_w = tw;
+    pix_h = th * 2;
 
-    total_mem = (unsigned long)ncells * sizeof(struct TCel) * 2 + 65536;
+    total_mem = (unsigned long)ncells * sizeof(struct TCel) * 2
+              + 65536
+              + (unsigned long)pix_w * pix_h * 3;
     mem = mmap(0, total_mem, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mem == (void *)-1) return;
@@ -61,6 +69,7 @@ void scr_init(int game_w, int game_h) {
     front = (struct TCel *)mem;
     back  = (struct TCel *)((char *)mem + (unsigned long)ncells * sizeof(struct TCel));
     wbuf  = (char *)mem + (unsigned long)ncells * sizeof(struct TCel) * 2;
+    pixels = (unsigned char *)((char *)mem + (unsigned long)ncells * sizeof(struct TCel) * 2 + 65536);
 
     for (i = 0; i < ncells; i++) {
         front[i].br = 1; front[i].bg = 1; front[i].bb = 1;
@@ -197,7 +206,13 @@ void scr_present(void) {
                 }
             }
 
-            wbuf[p++] = back[idx].ch;
+            if (back[idx].ch == CH_HALF_UP) {
+                wbuf[p++] = (char)0xE2;
+                wbuf[p++] = (char)0x96;
+                wbuf[p++] = (char)0x80;
+            } else {
+                wbuf[p++] = back[idx].ch;
+            }
             cr = y;
             cc = x + 1;
             front[idx] = back[idx];
@@ -212,6 +227,83 @@ void scr_present(void) {
     p = wb_s(p, "\033[0m\033[?2026l");
     if (p > 0) write(1, wbuf, p);
 }
+
+void scr_pixel(int x, int y, int r, int g, int b) {
+    int idx;
+    if (x < 0 || x >= pix_w || y < 0 || y >= pix_h) return;
+    idx = (y * pix_w + x) * 3;
+    pixels[idx]     = (unsigned char)r;
+    pixels[idx + 1] = (unsigned char)g;
+    pixels[idx + 2] = (unsigned char)b;
+}
+
+void scr_rect(int x, int y, int w, int h, int r, int g, int b) {
+    int px, py, x2, y2, idx;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    x2 = x + w; if (x2 > pix_w) x2 = pix_w;
+    y2 = y + h; if (y2 > pix_h) y2 = pix_h;
+    for (py = y; py < y2; py++)
+        for (px = x; px < x2; px++) {
+            idx = (py * pix_w + px) * 3;
+            pixels[idx]     = (unsigned char)r;
+            pixels[idx + 1] = (unsigned char)g;
+            pixels[idx + 2] = (unsigned char)b;
+        }
+}
+
+void scr_vline(int x, int y1, int y2, int r, int g, int b) {
+    int y, idx;
+    if (x < 0 || x >= pix_w) return;
+    if (y1 < 0) y1 = 0;
+    if (y2 >= pix_h) y2 = pix_h - 1;
+    for (y = y1; y <= y2; y++) {
+        idx = (y * pix_w + x) * 3;
+        pixels[idx]     = (unsigned char)r;
+        pixels[idx + 1] = (unsigned char)g;
+        pixels[idx + 2] = (unsigned char)b;
+    }
+}
+
+void scr_pixel_clear(int r, int g, int b) {
+    int i, total;
+    total = pix_w * pix_h;
+    for (i = 0; i < total; i++) {
+        pixels[i * 3]     = (unsigned char)r;
+        pixels[i * 3 + 1] = (unsigned char)g;
+        pixels[i * 3 + 2] = (unsigned char)b;
+    }
+}
+
+void scr_pixels_flush(void) {
+    int x, y, idx, pt, pb;
+    unsigned char tr, tg, tb, br, bg, bb;
+
+    for (y = 0; y < th; y++) {
+        for (x = 0; x < tw; x++) {
+            pt = ((y * 2) * pix_w + x) * 3;
+            pb = ((y * 2 + 1) * pix_w + x) * 3;
+
+            tr = pixels[pt]; tg = pixels[pt + 1]; tb = pixels[pt + 2];
+            br = pixels[pb]; bg = pixels[pb + 1]; bb = pixels[pb + 2];
+
+            idx = y * tw + x;
+
+            if (tr == br && tg == bg && tb == bb) {
+                back[idx].br = br; back[idx].bg = bg; back[idx].bb = bb;
+                back[idx].fr = br; back[idx].fg = bg; back[idx].fb = bb;
+                back[idx].ch = ' ';
+            } else {
+                back[idx].fr = tr; back[idx].fg = tg; back[idx].fb = tb;
+                back[idx].br = br; back[idx].bg = bg; back[idx].bb = bb;
+                back[idx].ch = CH_HALF_UP;
+            }
+        }
+    }
+}
+
+int scr_pixel_w(void) { return pix_w; }
+int scr_pixel_h(void) { return pix_h; }
 
 void scr_hide_cursor(void) {
     write(1, "\033[?25l", 6);

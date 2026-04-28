@@ -50,9 +50,9 @@ int kb_read(void) {
     if (c != '\033')
         return c;
 
-    /* ESC received — try to read escape sequence */
+    /* ESC received — wait briefly for rest of escape sequence */
     tv.tv_sec = 0;
-    tv.tv_usec = 0;
+    tv.tv_usec = 5000;
     FD_ZERO(&fds);
     FD_SET(0, &fds);
     if (select(1, &fds, 0, 0, &tv) <= 0)
@@ -62,7 +62,7 @@ int kb_read(void) {
         return 0;
 
     tv.tv_sec = 0;
-    tv.tv_usec = 0;
+    tv.tv_usec = 5000;
     FD_ZERO(&fds);
     FD_SET(0, &fds);
     if (select(1, &fds, 0, 0, &tv) <= 0)
